@@ -1,0 +1,512 @@
+margins::cplot(m4, "locale_desc") # average effect of locale
+margins::cplot(m4, "locale_desc", dx = "ss1", what = "effect") # keep
+local({
+cplot(m4, "ss1", data = full_data[full_data$locale_desc == "Rural, outside MSA",])
+cplot(m4, "ss1", data = full_data[full_data$locale_desc == "Mid-Size City",],
+draw = "add", col = "blue")
+cplot(m4, "ss1", data = full_data[full_data$locale_desc == "Small Town",],
+draw = "add", col = "red")
+cplot(m4, "ss1", data = full_data[full_data$locale_desc == "Urban Fringe of a Large City",],
+draw = "add", col = "purple")
+cplot(m4, "ss1", data = full_data[full_data$locale_desc == "Mid-Size City",],
+draw = "add", col = "gold")
+cplot(m4, "ss1", data = full_data[full_data$locale_desc == "Large City",],
+draw = "add", col = "orange")
+})
+m5 <- lm(update(formula(m3), . ~ . + ss1 * locale_desc), data = full_data)
+# Pick a row, here we sample at random
+example_school <- full_data[sample(row.names(full_data), 1), ]
+example_school <- example_school[rep(seq_len(nrow(example_school)),
+each=length(unique(full_data$locale_desc))),]
+example_school$locale_desc <- unique(full_data$locale_desc)
+example_school$yhat <- predict(m5, newdata = example_school)
+ggplot(example_school, aes(x = locale_desc, y = yhat)) +
+geom_hline(yintercept = example_school$ss2[1], color = I("red")) +
+geom_point() + theme_bw() +
+theme(axis.text = element_text(angle = 25))
+unweighted_mod <- lm(ss2 ~ ss1 + I(ss1^2) + I(ss1^3) + I(ss1^4),
+data = by_group$data[[7]])
+weighted_mod <- lm(ss2 ~ ss1 + I(ss1^2) + I(ss1^3) + I(ss1^4),
+data = by_group$data[[7]], weights = n1)
+plotdf <- data.frame(unweight_rmse = map_dbl(boot_dat$strap,
+~rmse(unweighted_mod, data = .x)),
+weight_rmse = map_dbl(boot_dat$strap,
+~rmse(weighted_mod, data = .x)))
+ggplot(plotdf, aes(x = unweight_rmse)) +
+geom_density(color = I("purple")) +
+geom_density(aes(x = weight_rmse), color = I("darkgreen")) +
+theme_bw() + labs(x = "RMSE")
+margins::cplot(weighted_mod, "ss1", col = "darkgreen")
+margins::cplot(unweighted_mod, "ss1", draw = "add", col = "purple")
+source("R/robust_functions.R")
+library(MASS)
+library(sandwich)
+source("R/robust_functions.R")
+install.packages("MASS")
+install.packages("sandwich")
+library(MASS)
+library(sandwich)
+library(lmtest)
+full_data$frl_per[is.na(full_data$frl_per)] <- 0
+m_notrobust <- lm(ss2 ~ ss1 + n1 + total_enrollment + frl_per + att_rate +
+factor(grade) + subject + factor(test_year),
+data = full_data)
+m_robust <- rlm(ss2 ~ ss1 + n1 + total_enrollment + frl_per + att_rate +
+factor(grade) + subject + factor(test_year),
+data = full_data)
+coefplot::multiplot(m_robust, m_notrobust, intercept = FALSE) + theme_bw()
+install.packages("MASS")
+summary(m_notrobust)
+summary(m_robust)
+plotdf <- data.frame(y = m_robust$model$ss2,
+pred_robust = predict(m_robust, data = m_robust$model),
+pred_norobust = predict(m_notrobust, data = m_robust$model))
+plotdf$resid_robust <- plotdf$y - plotdf$pred_robust
+plotdf$resid_norobust <- plotdf$y - plotdf$pred_norobust
+ggplot(plotdf) +
+geom_point(alpha = I(0.1), aes(x = pred_norobust, y = resid_norobust)) +
+geom_hline(yintercept = 0, linetype = 2) +
+geom_smooth(aes(x = pred_robust, y = resid_robust),
+color = I("red"), se = FALSE) +
+geom_smooth(aes(x = pred_norobust, y = resid_norobust),
+color = I("black"), se=FALSE) +
+theme_bw()
+library(sandwich)
+library(lmtest)
+summary(m_notrobust)$coefficients
+coeftest(m_notrobust,
+vcov = vcovHC(m_notrobust, "HC1"))
+gridExtra::grid.arrange(coefplot(m_notrobust, intercept = FALSE,
+sort = "alphabetical") + theme_bw(),
+coefplot_coeftest(
+coeftest(m_notrobust, vcov = vcovHC(m_notrobust, "HC1")),
+intercept = FALSE)
+)
+install.packages("gridExtra")
+gridExtra::grid.arrange(coefplot(m_notrobust, intercept = FALSE,
+sort = "alphabetical") + theme_bw(),
+coefplot_coeftest(
+coeftest(m_notrobust, vcov = vcovHC(m_notrobust, "HC1")),
+intercept = FALSE)
+)
+cluster_vcov <- get_CL_vcov(m_notrobust, full_data$distid)
+summary(m_notrobust)$coefficients
+coeftest(m_notrobust, vcov = cluster_vcov)
+coefplot(m_notrobust, intercept = FALSE)
+coefplot_coeftest(coeftest(m_notrobust, vcov = cluster_vcov), intercept = FALSE)
+plotdf <- data.frame(y = full_data$ss2,
+yhat_nr = fitted(m_notrobust),
+yhat_r = predict.robust(m_notrobust, data = full_data,
+robust_vcov = cluster_vcov))
+plotdf$resid_robust <- plotdf$y - plotdf$yhat_r.fit.fit
+plotdf$resid_norobust <- plotdf$y - plotdf$yhat_nr
+ggplot(plotdf) +
+geom_point(alpha = I(0.1), aes(x = yhat_nr, y = resid_norobust)) +
+geom_smooth(aes(x = yhat_r.fit.fit, y = resid_robust),
+color = I("red"), se = FALSE) +
+geom_smooth(aes(x = yhat_nr, y = resid_norobust),
+color = I("black"), se=FALSE) +
+theme_bw()
+coeftest(m_4, vcov = vcovHC(m_4, "HC1"))
+View(m4)
+plotdf <- data.frame(y = full_data$ss2,
+yhat_nr = fitted(m_notrobust),
+yhat_r = predict.robust(m_notrobust, data = full_data,
+robust_vcov = cluster_vcov))
+plotdf$resid_robust <- plotdf$y - plotdf$yhat_r.fit.fit
+plotdf$resid_norobust <- plotdf$y - plotdf$yhat_nr
+ggplot(plotdf) +
+geom_point(alpha = I(0.1), aes(x = yhat_nr, y = resid_norobust)) +
+geom_smooth(aes(x = yhat_r.fit.fit, y = resid_robust),
+color = I("red"), se = FALSE) +
+geom_smooth(aes(x = yhat_nr, y = resid_norobust),
+color = I("black"), se=FALSE) +
+theme_bw()
+coeftest(m4, vcov = vcovHC(m4, "HC1"))
+coeftest(m4, vcov = sandwich)
+coeftest(m4, vcov = vcovHC(m4, "HC0"))
+# check that "sandwich" returns HC0
+coeftest(lmAPI, vcov = sandwich)                # robust; sandwich
+# Missing data results from dividing by 0, so we can set these at 0
+full_data$ell_per[is.na(full_data$ell_per)] <- 0
+full_data$swd_per[is.na(full_data$swd_per)] <- 0
+#
+# Fit adjustment model
+adj_model <- lm(ss2 ~ factor(grade) * factor(test_year) + subject + frl_per +
+ell_per + swd_per + n1 + locale_desc, data = full_data)
+full_data$adj_ss2 <- predict(adj_model)
+# Missing data results from dividing by 0, so we can set these at 0
+full_data$ell_per[is.na(full_data$ell_per)] <- 0
+full_data$swd_per[is.na(full_data$swd_per)] <- 0
+#
+# Fit adjustment model
+adj_model <- lm(ss2 ~ factor(grade) * factor(test_year) + subject + frl_per +
+ell_per + swd_per + n1 + locale_desc, data = full_data)
+full_data$adj_ss2 <- predict(adj_model)
+example_districts <- c(155, 352, 277, 98, 323, 75, 44, 131, 280, 205)
+p1 <- ggplot(full_data[full_data$distid %in% example_districts, ],
+aes(y = adj_ss2, x = factor(distid))) +
+geom_boxplot() + geom_jitter() + theme_bw() +
+labs(title = "Adjusted Scores", x = "DISTID", y = "Adjusted SS2") +
+ylim(1000, 1350)
+p2 <- ggplot(full_data[full_data$distid %in% example_districts, ],
+aes(y = ss2, x = factor(distid))) +
+geom_boxplot() + geom_jitter() + theme_bw() +
+labs(title = "Unadjusted Scores", x = "DISTID", y= "Observed SS2") +
+ylim(1000, 1350)
+gridExtra::grid.arrange(p1, p2, ncol = 2)
+p1 <- ggplot(full_data[full_data$att_rate > 50,],
+aes(y = adj_ss2, x = att_rate)) +
+geom_jitter(alpha=1/7) + theme_bw() +
+labs(title = "Adjusted Scores", x = "Pre-Test", y= "Adjusted SS2") +
+geom_smooth(se=FALSE)  + ylim(1000, 1350)
+p2 <-  ggplot(full_data[full_data$att_rate > 50,],
+aes(y = ss2, x = att_rate)) +
+geom_jitter(alpha = 1/7) + theme_bw() +
+labs(title = "Unadjusted Scores", x = "Attendance", y= "Observed SS2") +
+geom_smooth(se=FALSE) + ylim(1000, 1350)
+gridExtra::grid.arrange(p1, p2, ncol = 2)
+vam_model <- lm(ss2 ~ ss1 + factor(grade) * factor(test_year) + frl_per +
+ell_per + swd_per + n1 + locale_desc + att_rate + subject +
+factor(distid), data = full_data)
+full_data$vam_ss2 <- predict(vam_model)
+full_data$vam_score <- rstandard(vam_model)
+ggplot(full_data[full_data$distid %in% example_districts, ],
+aes(y = vam_score, x = factor(distid))) +
+geom_boxplot(color="gray80") + geom_jitter() + theme_bw() +
+labs(title = "Vam Scores", x = "DISTID", y= "Observed SS2")
+coeftest(m4, vcov = vcovHC(m4, "HC1"))
+coeftest(m4, vcov = sandwich)
+coeftest(m4, vcov = vcovHC(m4, "HC0"))
+# check that "sandwich" returns HC0
+coeftest(m4, vcov = sandwich)                # robust; sandwich
+coeftest(m4, vcov = vcovHC(lmAPI, "HC0"))    # robust; HC0
+coeftest(m4, vcov = vcovHC(m4, "HC1"))
+coeftest(m4, vcov = sandwich)
+coeftest(m4, vcov = vcovHC(m4, "HC0"))
+# check that "sandwich" returns HC0
+coeftest(m4, vcov = sandwich)                # robust; sandwich
+coeftest(m4, vcov = vcovHC(m4, "HC0"))    # robust; HC0
+# check that the default robust var-cov matrix is HC3
+coeftest(m4, vcov = vcovHC(m4))           # robust; HC3
+coeftest(m4, vcov = vcovHC(m4, "HC3"))    # robust; HC3 (default)
+# reproduce the Stata default
+coeftest(m4, vcov = vcovHC(m4, "HC1"))    # robust; HC1 (Stata default)
+library(dplyr)
+# Read in the data
+# stu_data <- read.csv("data/sim_assessment_data.csv", stringsAsFactors = FALSE)
+load("data/cohort_test_scores.rda")
+head(sch_score, addrownums = FALSE)
+load("data/agency.rda")
+load("data/attend.rda")
+load("data/expel.rda")
+load("data/enrollment.rda")
+load("data/staff.rda")
+ls()
+full_data <- inner_join(sch_score, agency,
+by = c("distid", "schid", "test_year"))
+full_data <- inner_join(full_data, attend,
+by = c("distid", "schid", "test_year", "school_year"))
+full_data <- inner_join(full_data, expel,
+by = c("distid", "schid", "test_year", "school_year"))
+full_data <- inner_join(full_data %>% dplyr::select(-enrollment), full_enroll,
+by = c("distid", "schid", "test_year", "school_year"))
+full_data <- inner_join(full_data, staff,
+by = c("distid", "schid", "test_year", "school_year"))
+str(full_data)
+rm(agency, attend, sch_score, expel, staff, full_enroll)
+full_data %>% dplyr::select(test_year, grade, subject) %>%
+distinct %>% nrow
+full_data %>% dplyr::select(test_year, grade, subject) %>%
+group_by(test_year, grade, subject) %>%
+summarize(count = n()) %>%
+pull(count) %>% summary
+# Load the packages we need to fit multiple models
+library(tidyverse)
+library(broom) # to manipulate regression models
+library(modelr) # to fit multiple models and get their attributes easily
+# Define a grouped dataframe using only the columns we need
+# group by the grade, subject, and year
+# Then nest so the data hangs together in one list
+by_group <- full_data[, 1:10] %>%
+group_by(grade, subject, test_year) %>%
+nest()
+# Define a simple function that fits our model
+simple_model <- function(df) {
+lm(ss2 ~ ss1, data = df)
+}
+# Apply that model to each group in our dataset using the `map` function
+# This is equivalent to a loop, but more efficient to write
+by_group <- by_group %>%
+mutate(model = map(data, simple_model))
+# To understand our model(s) - use the `glance` function to compute some
+# summary statistics for each model
+glance <- by_group %>%
+mutate(glance = map(model, broom::glance)) %>%
+unnest(glance, .drop = TRUE)
+# Display the output
+arrange(glance, desc(r.squared))
+by_group <- full_data[, 1:10] %>%
+group_by(grade, subject, test_year) %>%
+nest()
+head(by_group)
+simple_model <- function(df) {
+# df is a user specified parameter to the function
+# ss2 and ss1 are variables that must be present in the df provided by the user
+lm(ss2 ~ ss1, data = df)
+}
+head(by_group)
+by_group <- by_group %>%
+# take each element of the data column, and pass it individually as the
+# first argument to the simple_model function
+mutate(model = map(data, simple_model))
+head(by_group)
+by_group <- inner_join(
+by_group, # our original data
+by_group %>%
+mutate(coefs = map(model, coef)) %>%  # get the coefficients out of the model
+group_by(grade, subject, test_year) %>% # group the data
+do(data.frame(t(unlist(.$coefs)))) # split each coefficient into a new column
+)
+names(by_group)
+# Replace the 6th elements name
+names(by_group)[6] <- "est_intercept"
+# Replace the 7th elements name
+names(by_group)[7] <- "est_ss1"
+plotdf <- sch_score_m1
+plotdf$dfbeta_ss1 <- m1_inf$infmat[, 2]
+ggplot(plotdf, aes(x = ss1, y = dfbeta_ss1)) +
+geom_point(alpha=I(0.2)) +
+geom_hline(yintercept = 2/sqrt(nrow(m1$model))) +
+geom_hline(yintercept = -2/sqrt(nrow(m1$model))) +
+facet_wrap(~subject) +
+geom_rug(alpha=1/4, position = "jitter") +
+theme_bw()
+ggplot(plotdf) + aes(x = ss2, y = dffits, color = school_size) +
+geom_point(alpha = 2/3) +
+facet_wrap( ~locale_desc) +
+scale_color_brewer(type = "qual", palette = 3, direction = -1) +
+guides(color = guide_legend(override.aes = list(alpha = 1))) +
+geom_hline(yintercept = dffits_limit) +
+geom_hline(yintercept = -dffits_limit) +
+theme(legend.position = "bottom",
+legend.key.size = unit(12, "points"))
+# Generate an ideal high leverage plot
+set.seed(52523)
+# Set values to simulate the data
+N <- 15000
+x1 <- rnorm(N)
+b1 <- rnorm(N, 0.8, 0.25)
+# a1 <- rbinom(N, size = 1, prob = 0.7)
+y <- 6 + b1 * x1 + rnorm(N, 0, 0.5)
+m_ex <- lm(y ~ x1)
+plotdf <- augment(m_ex)
+ggplot(plotdf, aes(x = y, y = .hat)) + geom_point(alpha = 1/5) + theme_bw() +
+geom_hline(yintercept = 3 * mean(plotdf$.hat))
+ggplot(sch_score_m1, aes(x = ss2, y = .hat)) +
+geom_point(alpha = 1/5) +
+theme_bw() +
+geom_smooth(se=FALSE) +
+geom_hline(yintercept = 3 * mean(sch_score_m1$.hat)) # generate a reference line
+m1_inf <- influence.measures(m1)
+head(m1_inf$infmat)
+View(sch_score_m1)
+plotdf <- sch_score_m1
+plotdf$dfbeta_ss1 <- m1_inf$infmat[, 2]
+plotdf <- full_data
+plotdf$dffits <- dffits(m1)
+library(dplyr)
+# Read in the data
+# stu_data <- read.csv("data/sim_assessment_data.csv", stringsAsFactors = FALSE)
+load("data/cohort_test_scores.rda")
+head(sch_score, addrownums = FALSE)
+load("data/agency.rda")
+load("data/attend.rda")
+load("data/expel.rda")
+load("data/enrollment.rda")
+load("data/staff.rda")
+ls()
+full_data <- inner_join(sch_score, agency,
+by = c("distid", "schid", "test_year"))
+full_data <- inner_join(full_data, attend,
+by = c("distid", "schid", "test_year", "school_year"))
+full_data <- inner_join(full_data, expel,
+by = c("distid", "schid", "test_year", "school_year"))
+full_data <- inner_join(full_data %>% dplyr::select(-enrollment), full_enroll,
+by = c("distid", "schid", "test_year", "school_year"))
+full_data <- inner_join(full_data, staff,
+by = c("distid", "schid", "test_year", "school_year"))
+str(full_data)
+rm(agency, attend, sch_score, expel, staff, full_enroll)
+full_data %>% dplyr::select(test_year, grade, subject) %>%
+distinct %>% nrow
+full_data %>% dplyr::select(test_year, grade, subject) %>%
+group_by(test_year, grade, subject) %>%
+summarize(count = n()) %>%
+pull(count) %>% summary
+# Load the packages we need to fit multiple models
+library(tidyverse)
+library(broom) # to manipulate regression models
+library(modelr) # to fit multiple models and get their attributes easily
+# Define a grouped dataframe using only the columns we need
+# group by the grade, subject, and year
+# Then nest so the data hangs together in one list
+by_group <- full_data[, 1:10] %>%
+group_by(grade, subject, test_year) %>%
+nest()
+# Define a simple function that fits our model
+simple_model <- function(df) {
+lm(ss2 ~ ss1, data = df)
+}
+# Apply that model to each group in our dataset using the `map` function
+# This is equivalent to a loop, but more efficient to write
+by_group <- by_group %>%
+mutate(model = map(data, simple_model))
+# To understand our model(s) - use the `glance` function to compute some
+# summary statistics for each model
+glance <- by_group %>%
+mutate(glance = map(model, broom::glance)) %>%
+unnest(glance, .drop = TRUE)
+# Display the output
+arrange(glance, desc(r.squared))
+by_group <- full_data[, 1:10] %>%
+group_by(grade, subject, test_year) %>%
+nest()
+head(by_group)
+simple_model <- function(df) {
+# df is a user specified parameter to the function
+# ss2 and ss1 are variables that must be present in the df provided by the user
+lm(ss2 ~ ss1, data = df)
+}
+head(by_group)
+by_group <- by_group %>%
+# take each element of the data column, and pass it individually as the
+# first argument to the simple_model function
+mutate(model = map(data, simple_model))
+head(by_group)
+summary(by_group$data[[10]]) # 10 and 11 are just indexes that say which e
+#                              element we want, here the 10th element
+summary(by_group$data[[11]]) # here the 11th element
+summary(by_group$model[[1]]) # here the first element
+summary(by_group$model[[2]])
+by_group <- inner_join(
+by_group, # our original data
+by_group %>%
+mutate(coefs = map(model, coef)) %>%  # get the coefficients out of the model
+group_by(grade, subject, test_year) %>% # group the data
+do(data.frame(t(unlist(.$coefs)))) # split each coefficient into a new column
+)
+names(by_group)
+# Replace the 6th elements name
+names(by_group)[6] <- "est_intercept"
+# Replace the 7th elements name
+names(by_group)[7] <- "est_ss1"
+ggplot(by_group, aes(x = est_intercept)) + geom_density() + theme_bw()
+ggplot(by_group, aes(x = est_ss1)) + geom_density() + theme_bw()
+ggplot(by_group) + scale_x_continuous(limits = c(700, 1600)) +
+scale_y_continuous(limits = c(700, 1600)) +
+geom_abline(data = by_group,
+aes(slope = est_ss1, intercept = est_intercept),
+alpha = I(0.5)) + theme_bw()
+install.packages("cowplot")
+by_group <- by_group %>%
+mutate(
+resids = map2(data, model, add_residuals),
+preds = map2(data, model, add_predictions)
+)
+by_group
+# unnest expands the data out from a column
+plotdf <- left_join(unnest(by_group, resids),
+unnest(by_group, preds))
+# Residual plot
+plotdf %>%
+ggplot(aes(x = pred, y = resid)) +
+geom_point(alpha = I(0.2)) + theme_bw() +
+geom_smooth()
+# Residual segment plot
+plotdf %>% top_n(200) %>%
+ggplot(aes(x = ss1, xend = ss1, y = pred, yend = ss1)) +
+geom_segment(alpha = I(0.2)) + theme_bw() +
+geom_smooth()
+# Residual arrow plot
+plotdf %>% sample_n(50) %>%
+ggplot(aes(x = ss1, xend = ss1, y = ss2, yend = pred)) +
+geom_segment(arrow = arrow(angle = 15, length = unit(0.1, "inches")), lineend = "butt")  +
+geom_smooth(aes(x = ss1, y = ss2), se=FALSE) +
+cowplot::theme_cowplot(font_size = 16) +
+geom_point(aes(x = ss1, y = ss2)) +
+labs(title = "Residuals Plotted by Observed Values of Pre-Test",
+caption = "Arrows show predicted value compared to observed value point.",
+x = "Pre-Test", y = "Posttest",
+subtitle = "Residuals from 50 year-subject-grade models of pretest on posttest")
+library(broom) # R package for working with regression models smoothly
+# Create a new dataset with augmented values
+m1 <- lm(ss2 ~ ss1 + n1 + subject, data = full_data)
+sch_score_m1 <- augment(m1) # generate the leverages and more for each row in data
+names(sch_score_m1)
+table(sch_score_m1$.hat > mean(sch_score_m1$.hat)*3)
+# Expanded code to make it easier to read:
+knitr::kable( # to make a pretty table in our document
+table( # compute a table
+round( # round the result, here to the tenths (1)
+sch_score_m1$.hat/mean(sch_score_m1$.hat), 1
+)
+)
+)
+# Generate an ideal high leverage plot
+set.seed(52523)
+# Set values to simulate the data
+N <- 15000
+x1 <- rnorm(N)
+b1 <- rnorm(N, 0.8, 0.25)
+# a1 <- rbinom(N, size = 1, prob = 0.7)
+y <- 6 + b1 * x1 + rnorm(N, 0, 0.5)
+m_ex <- lm(y ~ x1)
+plotdf <- augment(m_ex)
+ggplot(plotdf, aes(x = y, y = .hat)) + geom_point(alpha = 1/5) + theme_bw() +
+geom_hline(yintercept = 3 * mean(plotdf$.hat))
+ggplot(sch_score_m1, aes(x = ss2, y = .hat)) +
+geom_point(alpha = 1/5) +
+theme_bw() +
+geom_smooth(se=FALSE) +
+geom_hline(yintercept = 3 * mean(sch_score_m1$.hat)) # generate a reference line
+m1_inf <- influence.measures(m1)
+head(m1_inf$infmat)
+summary(m1)
+install.packages("cowplot")
+max(m1_inf$infmat[, 2] )
+min(m1_inf$infmat[, 2] )
+max(m1_inf$infmat[, 2] ) * 0.003
+min(m1_inf$infmat[, 2] ) * 0.003
+(max(m1_inf$infmat[, 2] ) * 0.003) + 0.852893
+(min(m1_inf$infmat[, 2] ) * 0.003) + 0.852893
+2 / sqrt(nrow(m1$model))
+table(abs(m1_inf$infmat[, 2] ) > (2/sqrt(nrow(m1$model))))
+plotdf <- sch_score_m1
+plotdf$dfbeta_ss1 <- m1_inf$infmat[, 2]
+ggplot(plotdf, aes(x = ss1, y = dfbeta_ss1)) +
+geom_point(alpha=I(0.2)) +
+geom_hline(yintercept = 2/sqrt(nrow(m1$model))) +
+geom_hline(yintercept = -2/sqrt(nrow(m1$model))) +
+facet_wrap(~subject) +
+geom_rug(alpha=1/4, position = "jitter") +
+theme_bw()
+plotdf <- full_data
+plotdf$dffits <- dffits(m1)
+# limits for dffits
+dffits_limit <- 2 * sqrt(length(coef(m1)) / nrow(m1$model))
+ggplot(plotdf) + aes(x = ss2, y = dffits) +
+geom_point(alpha = 1/4) +
+facet_grid(subject ~ grade) +
+geom_hline(yintercept = dffits_limit) +
+geom_hline(yintercept = -dffits_limit) +
+theme_bw()
+ggplot(plotdf) + aes(x = ss2, y = dffits, color = school_size) +
+geom_point(alpha = 2/3) +
+facet_wrap( ~locale_desc) +
+scale_color_brewer(type = "qual", palette = 3, direction = -1) +
+guides(color = guide_legend(override.aes = list(alpha = 1))) +
+geom_hline(yintercept = dffits_limit) +
+geom_hline(yintercept = -dffits_limit) +
+theme(legend.position = "bottom",
+legend.key.size = unit(12, "points"))

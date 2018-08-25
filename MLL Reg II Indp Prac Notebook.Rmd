@@ -1,0 +1,481 @@
+---
+title: "MLL- Reg II Idp Practice- R Notebook"
+output: html_notebook
+---
+
+#Load data and packages
+
+```{r setup, message=FALSE, warning=FALSE}
+library(dplyr)
+# Read in the data
+# stu_data <- read.csv("data/sim_assessment_data.csv", stringsAsFactors = FALSE)
+load("data/cohort_test_scores.rda")
+head(sch_score, addrownums = FALSE)
+```
+
+```{r loaddata}
+load("data/agency.rda")
+load("data/attend.rda")
+load("data/expel.rda")
+load("data/enrollment.rda")
+load("data/staff.rda")
+ls()
+```
+#join data
+```{r joindata}
+full_data <- inner_join(sch_score, agency, 
+                        by = c("distid", "schid", "test_year"))
+full_data <- inner_join(full_data, attend, 
+                        by = c("distid", "schid", "test_year", "school_year"))
+full_data <- inner_join(full_data, expel, 
+                        by = c("distid", "schid", "test_year", "school_year"))
+full_data <- inner_join(full_data %>% dplyr::select(-enrollment), full_enroll, 
+                        by = c("distid", "schid", "test_year", "school_year"))
+full_data <- inner_join(full_data, staff, 
+                        by = c("distid", "schid", "test_year", "school_year"))
+str(full_data)
+```
+#clean up workspace
+```{r cleanupworkspace}
+rm(agency, attend, sch_score, expel, staff, full_enroll)
+```
+
+#count rows proposed models 
+```{r countrows}
+full_data %>% dplyr::select(test_year, grade, subject) %>% 
+  distinct %>% nrow
+```
+
+
+#rows per model
+```{r countrowspergroup}
+full_data %>% dplyr::select(test_year, grade, subject) %>% 
+  group_by(test_year, grade, subject) %>%
+  summarize(count = n()) %>% 
+  pull(count) %>% summary
+```
+
+
+#loop regression model to 50 subsets of data
+```{r fiftymodelloop}
+# Load the packages we need to fit multiple models
+library(tidyverse)
+library(broom) # to manipulate regression models
+library(modelr) # to fit multiple models and get their attributes easily
+
+# Define a grouped dataframe using only the columns we need
+# group by the grade, subject, and year
+# Then nest so the data hangs together in one list
+by_group <- full_data[, 1:10] %>%
+  group_by(grade, subject, test_year) %>%
+  nest()
+
+# Define a simple function that fits our model
+simple_model <- function(df) {
+  lm(ss2 ~ ss1, data = df)
+}
+
+# Apply that model to each group in our dataset using the `map` function
+# This is equivalent to a loop, but more efficient to write
+by_group <- by_group %>%
+  mutate(model = map(data, simple_model))
+
+# To understand our model(s) - use the `glance` function to compute some 
+# summary statistics for each model
+glance <- by_group %>%
+  mutate(glance = map(model, broom::glance)) %>%
+  unnest(glance, .drop = TRUE)
+
+# Display the output
+arrange(glance, desc(r.squared))
+```
+
+
+#create a group data frame
+```{r creategroupeddf}
+by_group <- full_data[, 1:10] %>%
+  group_by(grade, subject, test_year) %>%
+  nest()
+
+head(by_group)
+```
+
+#fit model to each group in df
+```{r}
+simple_model <- function(df) {
+  # df is a user specified parameter to the function
+  # ss2 and ss1 are variables that must be present in the df provided by the user
+  lm(ss2 ~ ss1, data = df)
+}
+
+head(by_group)
+
+by_group <- by_group %>%
+  # take each element of the data column, and pass it individually as the 
+  # first argument to the simple_model function
+  mutate(model = map(data, simple_model))
+
+head(by_group)
+
+```
+
+
+#add column for model and fit to each group
+```{r fitmodeltoeachgroup}
+simple_model <- function(df) {
+  # df is a user specified parameter to the function
+  # ss2 and ss1 are variables that must be present in the df provided by the user
+  lm(ss2 ~ ss1, data = df)
+}
+
+head(by_group)
+
+by_group <- by_group %>%
+  # take each element of the data column, and pass it individually as the 
+  # first argument to the simple_model function
+  mutate(model = map(data, simple_model))
+
+head(by_group)
+
+```
+
+#add comlumn for extracted coefficients from model
+```{r getestimatesfrommodels}
+
+by_group <- inner_join(
+  by_group, # our original data
+   by_group %>%
+      mutate(coefs = map(model, coef)) %>%  # get the coefficients out of the model
+      group_by(grade, subject, test_year) %>% # group the data 
+      do(data.frame(t(unlist(.$coefs)))) # split each coefficient into a new column
+)
+
+names(by_group)
+# Replace the 6th elements name
+names(by_group)[6] <- "est_intercept"
+# Replace the 7th elements name
+names(by_group)[7] <- "est_ss1"
+
+```
+
+#plot all 50 estimates on graph
+```{r plotfiftymodelestimates}
+ggplot(by_group) + scale_x_continuous(limits = c(700, 1600)) +
+  scale_y_continuous(limits = c(700, 1600)) + 
+  geom_abline(data = by_group, 
+              aes(slope = est_ss1, intercept = est_intercept), 
+              alpha = I(0.5)) + theme_bw()
+```
+
+### What we learned from previous diagnostic analyses
+
+#In our previous module we determined that a one-size-fits-all approach led to a model that 
+#mostly identified schools in lower grades, and most often identified schools 
+#with small class sizes.
+
+#Residuals of 50 models showed misspecification
+
+#Outliers and high leverage points are influencing data. We know when looking at math compared to reading, math scores have more outliers that are pulling the slope of ss1 down. 
+##Possibly add subject as variable
+##Possibly test other variables, like grade level, to find outliers
+
+#Also learned that outliers exist in context of grade and locale. These also might be good variables to include in model. Also may want to test some more using DFITS and Cooks. 
+
+
+###New diagnostics/model comparisions
+
+
+##TESTING FOR OUTLIERS##
+
+#Look at high leverage points for variables- both to include in 50 models and maybe to include in global model 
+#create model and augmented scores
+```{r}
+library(broom) # R package for working with regression models smoothly
+# Create a new dataset with augmented values
+m1 <- lm(ss2 ~ ss1 + test_year, data = full_data)
+sch_score_m1 <- augment(m1) # generate the leverages and more for each row in data
+names(sch_score_m1)
+```
+
+#generate influence scores
+```{r influenceHistogram}
+m1_inf <- influence.measures(m1)
+head(m1_inf$infmat)
+```
+
+#facet wrap by test year
+```{r}
+plotdf <- sch_score_m1
+plotdf$dfbeta_ss1 <- m1_inf$infmat[, 2]
+
+ggplot(plotdf, aes(x = ss1, y = dfbeta_ss1)) + 
+  geom_point(alpha=I(0.2)) + 
+  geom_hline(yintercept = 2/sqrt(nrow(m1$model))) + 
+  geom_hline(yintercept = -2/sqrt(nrow(m1$model))) + 
+  facet_wrap(~test_year) + 
+  geom_rug(alpha=1/4, position = "jitter") +
+  theme_bw()
+
+```
+#some years seem to exhibit outliers, especially at lower values of ss1. These outliers seem more likely to pull down the slope of ss1. This doesn't seem as drastic as other variables.
+
+
+#facet wrap by grade level
+```{r}
+m1 <- lm(ss2 ~ ss1 + grade, data = full_data)
+sch_score_m1 <- augment(m1) # generate the leverages and more for each row in data
+names(sch_score_m1)
+
+m1_inf <- influence.measures(m1)
+head(m1_inf$infmat)
+
+plotdf <- sch_score_m1
+plotdf$dfbeta_ss1 <- m1_inf$infmat[, 2]
+
+ggplot(plotdf, aes(x = ss1, y = dfbeta_ss1)) + 
+  geom_point(alpha=I(0.2)) + 
+  geom_hline(yintercept = 2/sqrt(nrow(m1$model))) + 
+  geom_hline(yintercept = -2/sqrt(nrow(m1$model))) + 
+  facet_wrap(~grade) + 
+  geom_rug(alpha=1/4, position = "jitter") +
+  theme_bw()
+```
+#lower grade levels seem to be affected by outliers at lower levels of ss1 by pulling the slope down while higer grade levels seem to be affected by outliers at lower levels of ss1 by pulling the slope up
+
+
+#facet wrap by locale
+```{r}
+m1 <- lm(ss2 ~ ss1 + locale, data = full_data)
+sch_score_m1 <- augment(m1) # generate the leverages and more for each row in data
+names(sch_score_m1)
+
+m1_inf <- influence.measures(m1)
+head(m1_inf$infmat)
+
+plotdf <- sch_score_m1
+plotdf$dfbeta_ss1 <- m1_inf$infmat[, 2]
+
+ggplot(plotdf, aes(x = ss1, y = dfbeta_ss1)) + 
+  geom_point(alpha=I(0.2)) + 
+  geom_hline(yintercept = 2/sqrt(nrow(m1$model))) + 
+  geom_hline(yintercept = -2/sqrt(nrow(m1$model))) + 
+  facet_wrap(~locale) + 
+  geom_rug(alpha=1/4, position = "jitter") +
+  theme_bw()
+```
+#looks like outliers also greatly affect ss1 by locale as well. The outliers are much more likley to appear in locale 1 (large cities) where lower values of ss1 affect the slope of ss1 by pulling it down
+
+
+#facet wrap by school size
+```{r}
+m1 <- lm(ss2 ~ ss1 + school_size, data = full_data)
+sch_score_m1 <- augment(m1) # generate the leverages and more for each row in data
+names(sch_score_m1)
+
+m1_inf <- influence.measures(m1)
+head(m1_inf$infmat)
+
+plotdf <- sch_score_m1
+plotdf$dfbeta_ss1 <- m1_inf$infmat[, 2]
+
+ggplot(plotdf, aes(x = ss1, y = dfbeta_ss1)) + 
+  geom_point(alpha=I(0.2)) + 
+  geom_hline(yintercept = 2/sqrt(nrow(m1$model))) + 
+  geom_hline(yintercept = -2/sqrt(nrow(m1$model))) + 
+  facet_wrap(~school_size) + 
+  geom_rug(alpha=1/4, position = "jitter") +
+  theme_bw()
+```
+#looks like small schools are most subject to outliers (already knew that)
+
+#facet wrap by charter
+```{r}
+m1 <- lm(ss2 ~ ss1 + charter_ind, data = full_data)
+sch_score_m1 <- augment(m1) # generate the leverages and more for each row in data
+names(sch_score_m1)
+
+m1_inf <- influence.measures(m1)
+head(m1_inf$infmat)
+
+plotdf <- sch_score_m1
+plotdf$dfbeta_ss1 <- m1_inf$infmat[, 2]
+
+ggplot(plotdf, aes(x = ss1, y = dfbeta_ss1)) + 
+  geom_point(alpha=I(0.2)) + 
+  geom_hline(yintercept = 2/sqrt(nrow(m1$model))) + 
+  geom_hline(yintercept = -2/sqrt(nrow(m1$model))) + 
+  facet_wrap(~charter_ind) + 
+  geom_rug(alpha=1/4, position = "jitter") +
+  theme_bw()
+```
+# charter doesn't really seem to show that much of an effect
+
+
+#based on these analysis, it seems like to help control for outliers, location and grade level must somehow be controlled for in the model
+
+###USING FORMAL MODEL DIAGNOSTICS TO SHOW MODEL IMPROVEMENT###
+
+#explore and compare residual plots to see if better fit
+
+#resiual plot 50 original models
+```{r getresidualsfromeachmodel}
+install.packages("cowplot")
+by_group <- by_group %>%
+  mutate(
+    resids = map2(data, model, add_residuals),
+    preds = map2(data, model, add_predictions)
+  )
+by_group
+
+# unnest expands the data out from a column
+plotdf <- left_join(unnest(by_group, resids),
+                    unnest(by_group, preds))
+
+# Residual plot
+
+plotdf %>%
+  ggplot(aes(x = pred, y = resid)) +
+  geom_point(alpha = I(0.2)) + theme_bw() +
+  geom_smooth()
+
+```
+#m2 residual plot= grade and distid
+
+```{r}
+m2 <- lm(ss2 ~ ss1 + grade + distid, data = full_data)
+
+full_data$predictedm2 <- predict(m2)
+full_data$residualsm2 <- residuals(m2)
+
+ggplot(data=full_data, aes(x = predictedm2, y = residualsm2)) +
+geom_point(alpha = I(0.2)) + theme_bw() +
+geom_smooth()
+
+```
+
+#m3 residual plot= subject and locale
+```{r}
+m3 <- lm(ss2 ~ ss1 + subject + locale, na.action=na.exclude, data = full_data)
+
+ggplot(data=full_data, aes(x = predict(m3), y = residuals(m3))) +
+geom_point(alpha = I(0.2)) + theme_bw() +
+geom_smooth()
+
+```
+
+#m4 residual plot= grade and test year
+```{r}
+m4 <- lm(ss2 ~ ss1 + grade + test_year, na.action=na.exclude, data = full_data)
+
+ggplot(data=full_data, aes(x = predict(m4), y = residuals(m4))) +
+geom_point(alpha = I(0.2)) + theme_bw() +
+geom_smooth()
+
+```
+
+#m5 residual plot= grade and locale
+```{r}
+m5 <- lm(ss2 ~ ss1 + grade + locale, na.action=na.exclude, data = full_data)
+
+ggplot(data=full_data, aes(x = predict(m5), y = residuals(m5))) +
+geom_point(alpha = I(0.2)) + theme_bw() +
+geom_smooth()
+
+```
+
+#m6 residual plot= grade and frl per
+```{r}
+m6 <- lm(ss2 ~ ss1 + grade + frl_per, na.action=na.exclude, data = full_data)
+
+ggplot(data=full_data, aes(x = predict(m6), y = residuals(m6))) +
+geom_point(alpha = I(0.2)) + theme_bw() +
+geom_smooth()
+
+```
+
+#m7 residual plot= enrollment and grade level
+```{r}
+m7 <- lm(ss2 ~ ss1 + enrollment + grade, na.action=na.exclude, data = full_data)
+
+ggplot(data=full_data, aes(x = predict(m7), y = residuals(m7))) +
+geom_point(alpha = I(0.2)) + theme_bw() +
+geom_smooth()
+
+```
+
+
+###ADD VARIABLES TO 50 NESTED MODEL TO SEE IF BETTER FIT###
+
+```{r}
+by_group1 <- full_data[, 1:28] %>%
+  group_by(grade, subject, test_year) %>%
+  nest()
+
+head(by_group1)
+```
+
+
+
+###COMPARE 50 NESTED MODEL APPROACH TO COPLEX GLOBAL MODEL FIT TO ALL THE DATA###
+
+#try new global models to compare including new variables (these selected bc of previous and above analysis as indicating they may be highly influential variables)
+
+#Moving forward with (m2) distid and grade level as added to alt model, based on residual plots and previous analysis
+
+#look at model comparison between simple and alt model
+
+```{r}
+# Define a grouped dataframe using only the columns we need (1:10)
+# group by the grade, subject, and year
+# Then nest so the data hangs together in one list
+by_group <- full_data[, 1:10] %>%
+  group_by(grade, subject, test_year) %>%
+  nest()
+
+# Define a simple function that fits our model
+simple_model <- function(df) 
+  lm(ss2 ~ ss1, data = full_data)
+
+alt_model <- function(df) 
+  lm(ss2 ~ ss1 + distid + grade, data = full_data)
+
+# Apply that model to each group in our dataset using the `map` function
+# This is equivalent to a loop, but more efficient to write
+by_group <- by_group %>%
+  mutate(base_model = map(data, simple_model), 
+         full_model = map(data, alt_model))
+
+# Apply a function that makes an F-test of our two models (x and y)
+# returns only the statistics from the anova object we want
+# in this case, the difference in the sum of squares and the p-value of the 
+# F-test
+
+simple_anova <- function(x, y, stat = c("ss", "p"), ...){
+  out <- anova(x, y)
+  if(stat == "ss"){
+    return(out$`Sum of Sq`[[2]])
+  } else if(stat == "p"){
+    return(out$`Pr(>F)`[[2]])
+  }
+}
+
+ftests <- by_group %>% rowwise() %>%
+    do(ss = unlist(simple_anova(x = .$base_model, y = .$full_model, stat = "ss")), 
+      pval = unlist(simple_anova(x = .$base_model, y = .$full_model, stat = "p")))
+
+ftests <- apply(ftests, 2, unlist) # convert to a numeric object
+ftests <- as.data.frame(ftests) # make into a data.frame for ease of use
+
+table(ftests$pval < 0.05)
+```
+#this is telling me that in all 50 cases, the fuller global model was a much a better fit over the simple, proposed 50 models
+
+#therefore, I recommend using the following global model in place of the 50 model approach
+  # ss2 ~ ss1 + distid + grade
+
+
+
+
+
+
+

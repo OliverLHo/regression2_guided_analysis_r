@@ -1,0 +1,1846 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+  html_notebook:
+    number_sections: yes
+editor_options:
+  chunk_output_type: inline
+---
+
+
+## Introduction
+
+For our second guided analysis, we will be working on advancing the search for 
+a model to identify aggregate test score anomalies in our state. In our previous 
+module we determined that a one-size-fits-all approach led to a model that 
+mostly identified schools in lower grades, and most often identified schools 
+with small class sizes. Even with the addition of extra data, the data team 
+has not yet found a model that identifies abnormalities that are not correlated 
+with school size and school grade level. 
+
+You have been given the time to explore some alternative approaches to this 
+work - including stepping away from the one-size-fits-all approach and moving 
+toward a multi-model approach. Your supervisor has told you that before considering 
+the task not possible with the data at hand, she'd like you to look at the 
+possibility of fitting separate models to separate samples of the data and 
+seeing what this changes. 
+
+### Setup and Read Data
+
+For this task, the data team now has a full dataset available to it - IT has 
+filled each of the requests for additional data. Our first task is to join 
+these datasets and create an analysis dataset. 
+
+
+```{r setup, message=FALSE, warning=FALSE}
+library(dplyr)
+# Read in the data
+# stu_data <- read.csv("data/sim_assessment_data.csv", stringsAsFactors = FALSE)
+load("data/cohort_test_scores.rda")
+head(sch_score, addrownums = FALSE)
+```
+
+
+```{r loaddata}
+load("data/agency.rda")
+load("data/attend.rda")
+load("data/expel.rda")
+load("data/enrollment.rda")
+load("data/staff.rda")
+ls()
+```
+
+```{r joindata}
+full_data <- inner_join(sch_score, agency, 
+                        by = c("distid", "schid", "test_year"))
+full_data <- inner_join(full_data, attend, 
+                        by = c("distid", "schid", "test_year", "school_year"))
+full_data <- inner_join(full_data, expel, 
+                        by = c("distid", "schid", "test_year", "school_year"))
+full_data <- inner_join(full_data %>% dplyr::select(-enrollment), full_enroll, 
+                        by = c("distid", "schid", "test_year", "school_year"))
+full_data <- inner_join(full_data, staff, 
+                        by = c("distid", "schid", "test_year", "school_year"))
+str(full_data)
+```
+
+```{r cleanupworkspace}
+rm(agency, attend, sch_score, expel, staff, full_enroll)
+```
+
+
+Despite the additional data - there is pressure to keep the model simple. Your 
+team feels it will be easier to explain to external stakeholders and will create 
+fewer opportunities for schools to dispute their claims. The colleague who 
+proposed the first one-size-fits-all has proposed a simple alternative in response 
+to your feedback and subsequent analyses. 
+
+The new model is to simply fit a separate regression of the lagged scale score 
+on the current scale score for each separate grade-subject-year combination. 
+Your colleague has given you the code below to iterate through your data and 
+fit these combinations. 
+
+First, let's see how many models this gives us: 
+
+```{r countrows}
+full_data %>% dplyr::select(test_year, grade, subject) %>% 
+  distinct %>% nrow
+```
+
+And, how many rows per model:
+
+```{r countrowspergroup}
+full_data %>% dplyr::select(test_year, grade, subject) %>% 
+  group_by(test_year, grade, subject) %>%
+  summarize(count = n()) %>% 
+  pull(count) %>% summary
+```
+
+We have as few as 152 observations in some groups and as many as 469. Since we 
+know regression models are efficient and do not have large data requirements, 
+this is not a concern. 
+
+Now, let's look at a loop we can use to fit the same model to each of our 50 
+subsets of data efficiently:
+
+
+```{r fiftymodelloop}
+# Load the packages we need to fit multiple models
+library(tidyverse)
+library(broom) # to manipulate regression models
+library(modelr) # to fit multiple models and get their attributes easily
+
+# Define a grouped dataframe using only the columns we need
+# group by the grade, subject, and year
+# Then nest so the data hangs together in one list
+by_group <- full_data[, 1:10] %>%
+  group_by(grade, subject, test_year) %>%
+  nest()
+
+# Define a simple function that fits our model
+simple_model <- function(df) {
+  lm(ss2 ~ ss1, data = df)
+}
+
+# Apply that model to each group in our dataset using the `map` function
+# This is equivalent to a loop, but more efficient to write
+by_group <- by_group %>%
+  mutate(model = map(data, simple_model))
+
+# To understand our model(s) - use the `glance` function to compute some 
+# summary statistics for each model
+glance <- by_group %>%
+  mutate(glance = map(model, broom::glance)) %>%
+  unnest(glance, .drop = TRUE)
+
+# Display the output
+arrange(glance, desc(r.squared))
+```
+
+
+There is a lot to unpack in this bit of code. We're going to explore it in detail 
+and then modify different pieces of it to do our analysis. This is where the 
+iterative power of statistical computing really shines, because we can do many 
+operations repeatedly across our sub-samples, collect the results, and compare 
+and compute the results of our analyses. 
+
+The first thing we want to do is gather our data into subsamples grouped by 
+the grade, subject, and year of the test. This code takes our full data set, 
+groups it by these variables, and then nests each observation for each group 
+into a new dataframe and stores that dataframe as a column. The resulting data 
+structure is a dataframe with 50 rows, but one of the columns contains a 
+dataset within it that corresponds to the full observations for that combination 
+of grade, subject, and test year. 
+
+It's a neat trick that is useful in education data analysis where so many of our 
+questions are about nested structures of observations - students in classrooms, 
+classrooms in schools, schools in districts, etc. 
+
+
+```{r creategroupeddf}
+by_group <- full_data[, 1:10] %>%
+  group_by(grade, subject, test_year) %>%
+  nest()
+
+head(by_group)
+```
+
+The advantage here is that we already know how to tell R to do things to an 
+entire column of data at once, so we can use those same skills to rapidly 
+make calculations on each of these fifty separate datasets all without having 
+to write an explicit loop. 
+
+The next set of code defines our model as a function called, uncreatively, 
+`simple_model`. Function definitions are easy in R, once you read in the 
+function definition, you will see it appear in the "Functions" section of your 
+RStudio environment pane, and you can use it just like any other command in R.
+
+Writing functions can be a bit tricky at first. This function is not ideal because 
+it has variables within it (`ss2` and `ss1`) that are not defined in the function 
+itself -- it assumes they will exist. It is safe for us to use here because 
+we know those variables will always exist. 
+
+The next line of code simply tells R to create a new column in our dataset 
+called `model`, and to create that dataset it should apply the function simple_model 
+to each element of the `data` column and store the output (a linear model) in 
+the new column. The `map` function is from the `purrr` package and tells R to 
+use the `simple_model` function on each element of the `data` column. The term 
+`map` refers to the fact that we are "mapping" the function `simple_model` to 
+each element of the `data` column. 
+
+```{r fitmodeltoeachgroup}
+simple_model <- function(df) {
+  # df is a user specified parameter to the function
+  # ss2 and ss1 are variables that must be present in the df provided by the user
+  lm(ss2 ~ ss1, data = df)
+}
+
+head(by_group)
+
+by_group <- by_group %>%
+  # take each element of the data column, and pass it individually as the 
+  # first argument to the simple_model function
+  mutate(model = map(data, simple_model))
+
+head(by_group)
+
+```
+
+So now we have created for each group two new columns, but instead of storing 
+values, they store a dataset and a statistical model respectively. Go ahead 
+and look for yourself:
+
+```{r confirmmodelindataframe}
+summary(by_group$data[[10]]) # 10 and 11 are just indexes that say which e
+#                              element we want, here the 10th element
+summary(by_group$data[[11]]) # here the 11th element
+
+summary(by_group$model[[1]]) # here the first element
+summary(by_group$model[[2]])
+```
+
+Pretty neat! But, it's not enough to calculate 50 regression models, we want to 
+test, compare, and perhaps modify them. With the way our data are 
+now structured, we can easily extract the features we are interested 
+in from each of the models and store them for further analysis. Let's say we 
+wanted to look at how the intercept and slope terms vary across the fifty groups, 
+we can do that!
+
+Again we use the `map` function to extract the coefficients from our model - in 
+this case, we will have two coefficients. We use the R function `coef` and we map 
+it to each element of model. 
+
+```{r}
+
+by_group <- inner_join(
+  by_group, # our original data
+   by_group %>%
+      mutate(coefs = map(model, coef)) %>%  # get the coefficients out of the model
+      group_by(grade, subject, test_year) %>% # group the data 
+      do(data.frame(t(unlist(.$coefs)))) # split each coefficient into a new column
+)
+
+names(by_group)
+# Replace the 6th elements name
+names(by_group)[6] <- "est_intercept"
+# Replace the 7th elements name
+names(by_group)[7] <- "est_ss1"
+
+```
+
+And now we can plot the differences and do some graphical EDA. 
+
+```{r plotfiftymodelestimates}
+ggplot(by_group, aes(x = est_intercept)) + geom_density() + theme_bw()
+ggplot(by_group, aes(x = est_ss1)) + geom_density() + theme_bw()
+
+ggplot(by_group) + scale_x_continuous(limits = c(700, 1600)) +
+  scale_y_continuous(limits = c(700, 1600)) + 
+  geom_abline(data = by_group, 
+              aes(slope = est_ss1, intercept = est_intercept), 
+              alpha = I(0.5)) + theme_bw()
+```
+
+OK, so we've got our basic strategy. First, we're going to explore some 
+methods for model comparison. Then we're going to look at some empirical 
+tests we can apply to models. Then we'll look at methods for demonstrating and 
+communicating models to the wider world. 
+
+## Residuals
+
+It can be helpful to visually inspect the residuals, as we have seen previously, 
+not just to diagnose misfit, but to get a sense of the accuracy of our model. 
+We can create residual plots combining the fits from all of the models relatively 
+easily with another set of looping code. 
+
+
+```{r getresidualsfromeachmodel}
+install.packages("cowplot")
+by_group <- by_group %>%
+  mutate(
+    resids = map2(data, model, add_residuals),
+    preds = map2(data, model, add_predictions)
+  )
+by_group
+
+# unnest expands the data out from a column
+plotdf <- left_join(unnest(by_group, resids),
+                    unnest(by_group, preds))
+
+# Residual plot
+
+plotdf %>%
+  ggplot(aes(x = pred, y = resid)) +
+  geom_point(alpha = I(0.2)) + theme_bw() +
+  geom_smooth()
+
+# Residual segment plot
+plotdf %>% top_n(200) %>% 
+  ggplot(aes(x = ss1, xend = ss1, y = pred, yend = ss1)) +
+  geom_segment(alpha = I(0.2)) + theme_bw() +
+  geom_smooth()
+
+# Residual arrow plot
+plotdf %>% sample_n(50) %>% 
+  ggplot(aes(x = ss1, xend = ss1, y = ss2, yend = pred)) + 
+    geom_segment(arrow = arrow(angle = 15, length = unit(0.1, "inches")), lineend = "butt")  + 
+    geom_smooth(aes(x = ss1, y = ss2), se=FALSE) + 
+      cowplot::theme_cowplot(font_size = 16) + 
+  geom_point(aes(x = ss1, y = ss2)) + 
+  labs(title = "Residuals Plotted by Observed Values of Pre-Test", 
+       caption = "Arrows show predicted value compared to observed value point.", 
+       x = "Pre-Test", y = "Posttest", 
+       subtitle = "Residuals from 50 year-subject-grade models of pretest on posttest")
+```
+
+We notice that even when we have fit 50 models to different sets of the data 
+our models exhibit the funneling as the predicted value increases. We already 
+know this is a symptom of model misspecification. 
+
+Further inspection of the residuals is helpful here - so let's look at some 
+formal ways of identifying outliers, high leverage, and influential observations 
+next. 
+
+
+## Outliers, High Leverage, and Influential Observations
+
+As we have mentioned, OLS regression models can be sensitive to outliers. There 
+are a number of diagnostic techniques that can be used to identify outliers. 
+
+All quotes below and excellent further detail on regression diagnostics is 
+available through the free, online, Penn State course on regression - available 
+here: https://onlinecourses.science.psu.edu/stat501/node/338
+
+A common method to measure potential outliers is to compute the "hat values" or 
+"leverage" for each observation in a regression model.  
+
+Leverages are defined as: 
+
+> the leverage, $h_{ii}$, quantifies the influence that the observed response
+$y_{i}$ has on its predicted value $\hat y_{i}$. That is, if $h_{ii}$ is small,
+then the observed response $y_{i}$ plays only a small role in the value of the
+predicted response $\hat y_{i}$. On the other hand, if $h_{ii}$ is large, then
+the observed response $y_{i} plays a large role in the value of the predicted
+response $\hat y_{i}$. It's for this reason that the $h_{ii}$ are called the
+"leverages."
+
+Leverages can be interpreted as the distance between the x values of an
+observation and the mean of the x values for all remaining data points.
+Leverages have range from 0 to 1 and the sum of all of the leverages is equal to
+the total number of parameters (regression coefficients, including the
+intercept) in the model.
+
+A word of caution! Remember, a data point has large influence only if it affects
+the estimated regression function. Leverages only take into account
+the extremeness of the x values, but a high leverage observation may or may not
+actually be influential.
+
+There is such an important distinction between a data point that has high
+leverage and one that has high influence that it is worth saying it one more
+time:
+
+> The leverage merely quantifies the potential for a data point to exert strong
+influence on the regression analysis. The leverage depends only on the predictor
+values. Whether the data point is influential or not also depends on the
+observed value of the reponse $y_{i}$.
+
+### High Leverage
+
+To better understand our data, let's start by looking at observations with a 
+high potential to influence our model -- high-leverage observations. To compute 
+the leverages, we can use the `augment()` function in the `broom` package, which 
+adds observation-level regression diagnostics to our original data frame for 
+convenient analysis and plotting. 
+
+For simplicity, we'll fit one global model and work with it. At the end, we'll 
+return to how to apply this analysis to submodels. 
+
+
+```{r}
+library(broom) # R package for working with regression models smoothly
+# Create a new dataset with augmented values
+m1 <- lm(ss2 ~ ss1 + n1 + subject, data = full_data)
+sch_score_m1 <- augment(m1) # generate the leverages and more for each row in data
+names(sch_score_m1)
+
+```
+
+We have our original outcome variable, predictor variable, our model fits, the 
+standard error of our model fits, the residuals, and then a series of diagnostic 
+variables: `.hat`, `.sigma`, `.cooksd`, and `.std.resid`. For now, we will focus 
+on the `.hat` variable as this is the measure of leverage for each observation. 
+One conventional rule of thumb is that an observation with a hat value greater 
+than 3 times the mean hat value is potentially influential. Let's compute a 
+table of how many observations meet this criteria. 
+
+
+```{r}
+table(sch_score_m1$.hat > mean(sch_score_m1$.hat)*3)
+```
+
+We have a big dataset, so while 362 is a large number of observations,
+proportionally it is fairly small. This is a typical result for a dataset this
+size and a model of this nature.
+
+**Bonus question: How can you verify that this amount is typical?**
+
+Remember that our research question is around the outliers though - we want 
+the model to identify meaningful outliers, so paying careful attention to the 
+attributes of these observations is important. 
+
+We can get a little more detail by calculating the ratio of each hat value to 
+the mean of all the hat values. The code below rounds this ratio to the nearest 
+tenth and presents it in a table, allowing us to get a fuller picture of the 
+whole distribution of hat value - remember that values greater than 3x the 
+mean are considered high leverage. 
+
+```{r}
+# Expanded code to make it easier to read:
+knitr::kable( # to make a pretty table in our document
+  table( # compute a table
+    round( # round the result, here to the tenths (1)
+      sch_score_m1$.hat/mean(sch_score_m1$.hat), 1
+      )
+    )
+  )
+```
+
+
+Now that we have a sense of the distribution of high leverage observations and 
+how many we have (how would you describe this distribution?) - it's time to 
+look at the impact they have on the regression model itself by directly measuring 
+their influence. 
+
+#### Influential Observations
+
+Once we have identified our high leverage observations, we can combine this 
+information with information about the influence of observations - incorporating 
+information about the dependent variable as well. A quick first look at this is 
+to look at the hat values that also have large (or small) values of the outcome variable. 
+These observations, mathematically, will exert extra influence on our estimate 
+of beta, and are thus influential on our model.  
+
+This code simulates a perfectly specified regression model. 
+
+```{r}
+# Generate an ideal high leverage plot
+set.seed(52523)
+# Set values to simulate the data
+N <- 15000
+x1 <- rnorm(N)
+b1 <- rnorm(N, 0.8, 0.25)
+# a1 <- rbinom(N, size = 1, prob = 0.7)
+y <- 6 + b1 * x1 + rnorm(N, 0, 0.5)
+m_ex <- lm(y ~ x1)
+plotdf <- augment(m_ex)
+ggplot(plotdf, aes(x = y, y = .hat)) + geom_point(alpha = 1/5) + theme_bw() + 
+  geom_hline(yintercept = 3 * mean(plotdf$.hat))
+```
+
+In a well-specified regression model the high leverage observations will be 
+evenly balanced between high and low values of the outcome, as in the plot above. 
+Think about the points above the high-leverage horizontal line as balancing against 
+one another -- too many to one side or another and the results of the model 
+may be skewed and at risk of being biased by outlier 
+observations. 
+
+Let's see how the model we fit looks by this metric:
+
+```{r}
+ggplot(sch_score_m1, aes(x = ss2, y = .hat)) + 
+  geom_point(alpha = 1/5) + 
+  theme_bw() + 
+  geom_smooth(se=FALSE) + 
+  geom_hline(yintercept = 3 * mean(sch_score_m1$.hat)) # generate a reference line
+
+```
+
+
+We don't have to rely on the eye-test alone. Fortunately, we have a further set 
+of diagnostics available to use to measure 
+the influence that each observation has on our estimates of $\beta$. Collectively 
+known as influence measures, these compute the influence of individual observations 
+by looking at the difference in the model without each observation, compared to 
+the model with all observations. This deletion technique allows us to empirically 
+assess the contribution of each observation to the coefficients in the model. 
+This metric is called a `DFBETA`. The `dfbeta` for each observation is calculated 
+for each regressor in our dataset, so with three regressors and an intercept we 
+will get 4 DFBETA measures. 
+
+R provides us a convenience function that computes the deletion measures for us. 
+The `influence.measures()` returns a list of matrices computing these features. 
+
+```{r influenceHistogram}
+m1_inf <- influence.measures(m1)
+head(m1_inf$infmat)
+```
+
+This format isn't particularly helpful to us - it is hard to interpret these numbers. 
+Let's focus on the coefficient for `ss1` given by the column `dfb.ss1`. This 
+represents the change in the coefficient with this observation excluded, but the 
+change is scaled by the standard error of the coefficient itself. Let's do a 
+quick worked example to understand how the scale of this 
+important measure works. 
+
+First, let's remind ourselves of the standard error and estimate of our coefficient 
+for `ss1`. 
+
+```{r}
+summary(m1)
+```
+
+The coefficient is 0.852893 and the standard error is ~0.003. Now, let's look at 
+the largest and smallest values of DFBETAS: 
+
+```{r}
+max(m1_inf$infmat[, 2] )
+min(m1_inf$infmat[, 2] )
+```
+
+To see the change in the slope on `ss1` that results, we need to do some quick 
+math -- first we "unstandardize" the estimate by multiplying by the standard 
+error: 
+
+```{r}
+max(m1_inf$infmat[, 2] ) * 0.003
+min(m1_inf$infmat[, 2] ) * 0.003
+```
+
+And then we add this to the coefficient to see how much the coefficient will 
+change: 
+
+```{r}
+(max(m1_inf$infmat[, 2] ) * 0.003) + 0.852893
+(min(m1_inf$infmat[, 2] ) * 0.003) + 0.852893
+```
+
+The change is not very much for our biggest and smallest values, but remember that this is 
+because there are > 15,000 observations in our data, so we need to focus on the 
+impact of observations relative to the average observation, not their impact 
+alone. A common rule of thumb for identifying large DFBETA values is any value 
+larger than 2 / sqrt(n) where n is the number of rows in our sample. 
+
+In this case, any DFBETA with an absolute value greater than: 
+
+```{r}
+2 / sqrt(nrow(m1$model))
+```
+
+Let's see how many of these we have: 
+
+```{r}
+table(abs(m1_inf$infmat[, 2] ) > (2/sqrt(nrow(m1$model))))
+```
+
+Now, for us, the DFBETAs become just like any other data point, and we can 
+use a variety of EDA techniques to explore hypotheses about which observations 
+represent these outlier points. Here's one example, where we look at variables 
+in the model and plot the DFBETAs against them -- this shows the relationship 
+between the value of `ss1`, it's DFBETA, and how that relationship is different 
+across reading and math. 
+
+```{r}
+plotdf <- sch_score_m1
+plotdf$dfbeta_ss1 <- m1_inf$infmat[, 2]
+
+ggplot(plotdf, aes(x = ss1, y = dfbeta_ss1)) + 
+  geom_point(alpha=I(0.2)) + 
+  geom_hline(yintercept = 2/sqrt(nrow(m1$model))) + 
+  geom_hline(yintercept = -2/sqrt(nrow(m1$model))) + 
+  facet_wrap(~subject) + 
+  geom_rug(alpha=1/4, position = "jitter") +
+  theme_bw()
+
+```
+
+This is one way to explore the DFBETAs, and what does it show us. First, it 
+confirms that bigger and smaller values of the variable are more likely to have 
+a bigger influence on the coefficient. But, the pattern is very different between 
+the two subjects, and the distribution of outlier values (those outside of the 
+horizontal lines) are also different. What does this evidence suggest about how 
+you could change this model? 
+
+In this plot, we included a 
+`rug` element on the bottom which shows each observed value of the x-axis and 
+y-axis as a tick. Here we can see that though the distribution is balanced, 
+extreme values are not balanced - with more extreme values present on the 
+low-end of the scale (< -0.05) than at the high end (> 0.05). This means 
+that there 
+are more observations that are pulling the slope of `ss1` downward to a high 
+degree than upward. If we excluded all values of `ss1` that are above and below 
+the same cut-off, we would expect the coefficient on `ss1` to be more positive 
+in that case. Knowing the direction of this bias among the extreme values in our 
+data is important in understanding how the model is behaving on this set of data. 
+
+
+#### Further Metrics
+
+Two further metrics you may use to identify outlier observations are Cook's D and 
+DFITS. These produce a similar metric that combines the residuals and the leverage 
+to measure true influence of each observation. Each is on a different scale, but 
+should identify similar observations. Some rules of thumb for interpreting 
+these metrics 
+(from the excellent UCLA webbook on regression: https://stats.idre.ucla.edu/stata/webbooks/reg/chapter2/stata-webbooksregressionwith-statachapter-2-regression-diagnostics/)
+
+- Cook's D ranges from 0 to very large positive values. The traditional cutoff 
+point for high influence observations is 4/n where n is the number of rows in 
+the sample.
+- DFITS can range from - large values to positive large values. The cutoff point 
+for DFITS is 2 * sqrt(k/n) where k is the number of predictors in our model. 
+
+You can apply a similar analysis we just did for the DFBETAs to explore these. 
+Let's quickly go through an analysis where we look at the relationship between 
+influential observations and variables that are not in our model. Let's use 
+DFITS because it keeps the directionality information (whether the influence is 
+positive or negative). 
+
+```{r}
+plotdf <- full_data
+plotdf$dffits <- dffits(m1)
+
+# limits for dffits
+dffits_limit <- 2 * sqrt(length(coef(m1)) / nrow(m1$model))
+
+ggplot(plotdf) + aes(x = ss2, y = dffits) + 
+    geom_point(alpha = 1/4) + 
+    facet_grid(subject ~ grade) + 
+    geom_hline(yintercept = dffits_limit) + 
+    geom_hline(yintercept = -dffits_limit) + 
+    theme_bw()
+
+```
+
+Here we have brought in grade level, a variable our original model left out. 
+Now we see the motivation for splitting the model by sample. 
+
+Just for fun, let's look at one more: 
+
+```{r}
+ggplot(plotdf) + aes(x = ss2, y = dffits, color = school_size) + 
+    geom_point(alpha = 2/3) + 
+    facet_wrap( ~locale_desc) + 
+  scale_color_brewer(type = "qual", palette = 3, direction = -1) + 
+  guides(color = guide_legend(override.aes = list(alpha = 1))) +
+    geom_hline(yintercept = dffits_limit) + 
+    geom_hline(yintercept = -dffits_limit) + 
+    theme(legend.position = "bottom", 
+                       legend.key.size = unit(12, "points"))
+```
+
+This type of analysis can give us insight into how our model should be modified 
+or how our sample should be restricted to account for systematic variation in 
+influential observations by key observable characteristics. Try some of your 
+own analysis!
+
+## Regression Diagnostics 
+
+In the lecture we learned about the utility of regression diagnostic tests. Tests 
+are useful because they can scale to multiple models and tell us which models 
+to look into further and which models are OK. We can also make comparisons between 
+sets of multiple model specifications by comparing how many of the fifty models 
+fail the tests under different specifications. In short, model diagnostics are 
+a scalable way to assess regression models. 
+
+While base-R provides some basic regression diagnostic functionality, it is more 
+consistently implemented using the suite of functions provided by the `lmtest` 
+package. These tests take some form of dividing the data or recasting the model, 
+and then comparing for statistically meaningful differences in the divided data 
+or in the recasted model residuals. 
+
+In general these functions generate a test statistic, degrees of freedom, and 
+then generate a p-value against the null-hypothesis that the model is 
+correctly specified. If the p-value is less than a critical value, the data 
+supports the hypothesis that the model is not well-specified according to the 
+particular test. 
+
+This is one of the rare times when I will tell you that the p-value is a 
+useful statistic to consider on its own! It's just more efficient if you want 
+to test a model with multiple diagnostics, or multiple models with the same 
+diagnostic. These tests have different test statistics and are all designed 
+for interpretation around the p-value, so I recommend just using it. The caveat 
+is that this is applied work and the diagnostics are intended to provide 
+evidence of model failure. A model where a diagnostic p-value 
+is below a critical value is a model that *likely* has a problem (though we 
+can't tell the *degree* of the problem from the diagnostic alone), while a 
+model without a low p-value may or may not. Thus, this approach is a good 
+first-pass, a noisy but useful indicator of how well specified these models 
+may or may not be. 
+
+We've talked briefly about some of the tests in the lecture, but here we'll 
+review them in light of the options that can be passed to them. We'll just 
+focus on testing a single model for now, but at the bottom of this tutorial 
+there is code for combining the tests and testing all the models together. For 
+now, let's focus on how the testing functions work in R. 
+
+### Heteroskedasticity Tests
+
+- Breusch-Pagan Test, Golfeld-Quandt Test
+
+The Breusch-Pagan test fits a linear model to the residuals of the regression 
+model using the same predictors. If too much variance is explained by the 
+predictors in the original model, then the model is considered to be 
+heteroskedastic. 
+
+```{r}
+install.packages("lmtest")
+library(lmtest) # load the library for model testing
+bptest(m1) # Breusch-Pagan test, takes a model object as its argument
+```
+
+This model fails the Breusch-Pagan test - there is evidence of heteroskedacticity 
+given the model and the data. 
+
+The Goldfeld-Quandt test fits the original model to two subsets of the data defined 
+by a breakpoint and compares the variances of the residuals. If the differences 
+are statistically different, then the model is considered heteroskedastic. By 
+default the sample is split in half, but because it involves splitting the data 
+it is sensitive to the order of observations, and we can specify the order 
+we which to place the observations in. 
+
+```{r}
+gqtest(m1) # model object
+gqtest(m1, 
+       order.by = ~ss1, 
+       data=m1$model, # one trick in R is if you want to pull the data a 
+       # model was fit to, for a lm object you can use my_model$model to access it
+       fraction = 0.4)
+```
+
+Here we see the challenge of regression diagnostics - the Breush-Pagan test 
+said we had heteroskedacticity, and so do our residual plots, but the GQ test 
+does not, even under different reorderings of the data. 
+
+This illustrates two issues to be wary of when using statistical diagnostics. 
+First, all diagnostics/measures are imperfect and they should be weighed 
+carefully with other forms of evidence. In this case, we are already skeptical 
+of these models based on our analysis of the residuals and other factors so 
+finding out that it may exhibit heteroskedacticity is not unexpected. Second, 
+statistical diagnostics, like all other statistics, are susceptible to researchers 
+"p-hacking" - running multiple tests with different parameters until a suitably 
+low p-value is found. Try it with the `gqtest()` function - if you order the 
+data the right way and set the `fraction` argument correctly, you will 
+undoubtedly find a p-value below the critical value. 
+
+### Autocorrelation Diagnostics
+
+- Durbin-Watson Test, Box-Pierce Test, Ljung-Box Test, Breusch-Godfrey Test
+
+Autocorrelation is a problem with regression models where the residuals of 
+one observation are correlated with the residuals of other observations in the 
+data. Most commonly, autocorrelation occurs when observations are ordered 
+by time and the observation of a unit in time t is correlated with its value 
+at time t-1 (think the temperature day to day anywhere in the world except 
+Montana). 
+
+Autocorrelation diagnostics, to detect this,  rely on the ordering of the
+observations. They are 
+especially important when modeling time-series data and including time as a 
+feature in the model. Our model here does this implicitly modeling test scores 
+in time t as a function of the scores in time t-1 and we have a test year 
+variable in the data. 
+
+
+
+```{r}
+dwtest(ss2 ~ ss1, data = by_group$data[[6]])
+Box.test(residuals(lm(ss2~ss1, data = by_group$data[[6]])))
+Box.test(residuals(lm(ss2~ss1, data = by_group$data[[6]])), type = "Ljung")
+bgtest(ss2 ~ ss1, data = by_group$data[[6]])
+```
+
+Since we have already split our data out by test year, we have broken up the 
+most obvious source of autocorrelation in our group-wise regression model 
+strategy. Let's look at some other potential ways we could imagine autocorrelation 
+occurring. 
+
+However, more generally, autocorrelation can occur if there is some grouping of 
+observations that isn't accounted for -- common in education. For example, in 
+our data, the grade-subject-test_year school average observations are nested 
+within districts and schools within the same district are more similar to one 
+another than schools in different districts. Failing to account for this could 
+cause autocorrelation in our models. 
+
+
+```{r}
+dwtest(ss2 ~ ss1, data = by_group$data[[6]], order.by = ~distid)
+bgtest(ss2 ~ ss1, data = by_group$data[[6]], order.by = ~distid)
+
+```
+
+When we look at it not temporally, but organizationally, we see evidence that 
+there is indeed autocorrelation in our data -- observations from the same 
+district are correlated enough with one another to cause problems. 
+
+### Multicollinearity
+
+Aside from being the most straightforward critique of any social science statistical
+model, multicollinearity is a big problem for interpreting magnitude and
+statistical significance of individual predictors in a model. If two highly
+correlated variables are included in the model, then their coefficients will be
+a blend of the effect of both variables and the standard errors for these
+variables will be inflated and unreliable.
+
+From UCLA's Stata Regression diagnostic guide:
+> As a rule of thumb, a variable whose VIF values are greater than 10 may merit further investigation. It  means that the variable could be considered as a linear combination of other independent variables.
+
+```{r}
+# install.packages("car") if you don't already have the car package
+install.packages("car")
+# Fit a more complex model as an example
+tmp_fit <- lm(ss2 ~ ss1 + factor(grade) * factor(test_year) + factor(subject) + n1, data = full_data)
+car::vif(tmp_fit)
+
+```
+
+
+### Misspecification Diagnostics
+
+- Rainbow Test, RESET Test, Harvey-Collier Test
+
+One form of ommitted variable biase we can easily test for is whether continuous
+measures in our model would be better described by polynomial terms instead of a
+single linear coefficient. Tests of this use different strategies.
+
+The Rainbow test fits a regression to a middle portion of the data and does 
+a test to see if it fits the ends of the data as well as the middle. If the 
+fit for either tail is worse than for the center subsample, this is taken as 
+evidence the model could be improved by polynomial terms. 
+
+```{r}
+raintest(ss2 ~ ss1, data = by_group$data[[6]])
+```
+
+The RESET test fits a model with a user-specified number of additional powers 
+of the X variables and then does a standard F-test to see if this new model 
+outperforms the original model. The most common test is the Ramsey Regression Equation Specification Error Test, 
+or RESET, which checks whether there are omitted polynomial terms to a predictor 
+that would improve model fit. 
+
+This tells us that the sum of squares will be meaningfully reduced with the 
+simple inclusion of polynomials of the main predictor -- `ss1`. Thus the 
+new model should take the form:
+
+$$SS_{2} = \alpha + \beta_{1}SS_{1} +  \beta_{2}SS_{1}^2 + \beta_{3}SS_{1}^3 + \beta_{4}SS_{1}^4$$
+
+
+```{r}
+reset(ss2 ~ ss1, power= 2:4, data = by_group$data[[6]])
+```
+
+
+The Harvey-Collier test conducts a t-test on the means of the recursive residuals. 
+The means should not differ from 0 significantly, so if they do, this is taken 
+as evidence supporting the need for polynomial terms. 
+
+
+```{r}
+harvtest(ss2 ~ ss1, data = by_group$data[[6]])
+```
+
+These can also 
+optionally be ordered by a vector that may be meaningful such as a grouping 
+term or the value of a predictor. We might consider ordering the data by 
+class size (`n1`) or pre-test score (`ss1`) or school district `distid`. 
+
+```{r}
+raintest(ss2 ~ ss1, data = by_group$data[[6]], order.by = ~ss1)
+harvtest(ss2 ~ ss1, data = by_group$data[[6]], order.by = ~ss1)
+```
+
+The same concerns about p-hacking apply. 
+
+## Model Comparisons
+
+After we have diagnosed the model, we want to propose alternative models, and 
+we need a framework for assessing the difference between any alternatives and 
+our existing model. 
+
+Remember that in our previous work we not only identified alternative models 
+using the additional data we've merged in, but we even found improved model 
+fit by including polynomial regression terms to account for the non-linear 
+relationship we observed between `ss1` and `ss2` at the tails of the distribution. 
+
+There are multiple ways to compare models depending on the purposes of the model 
+and the goals of the analyst. We will discuss three here: 
+
+1. Comparing model fit to the data
+2. Comparing model improvement with F-tests
+3. Comparing model predictive power
+
+In this section, we'll look at how we can do model comparison across our fifty 
+models. This will allow us to compare the same model across different subsets 
+of data (within the fifty models) and compare new model fits to the same data 
+(compare model A to model B across each of the fifty sets of data). Both 
+of these strategies are helpful when evaluating models repeated across subsets. 
+
+First, let's look at a method we can use to get and plot the model fits for each 
+of our 50 submodels using the `glance` function to extract the model fit statistics 
+from each group. 
+
+```{r}
+glance <- by_group %>%
+  mutate(glance = map(model, broom::glance)) %>%
+  unnest(glance, .drop = TRUE)
+
+arrange(glance, desc(r.squared))
+
+
+ggplot(glance, aes(x = grade, y = r.squared, color = subject)) +
+  geom_jitter(width = 0.1, height = 0) + theme_bw()
+
+```
+
+This plot shows 50 points, one for each combination of grade, year, and subject. 
+Each point represents the r-squared of our proposed model (ss2 ~ ss1) fit to 
+that specific subset of the data. The plot shows a clear pattern, our model 
+fits better in higher grades than in lower grades. 
+
+Before we go comparing alternatives to all fifty models, let's look at the three
+ways we can compare models through the lens of a a single year-grade-subject
+model. We'll start by adding the class size, one of the options we explored in
+the previous guided tutorial, to build an alternative:
+
+```{r}
+m1 <- by_group$model[[15]]
+m2 <- lm(ss2 ~ ss1 + n1, data = by_group$data[[15]])
+summary(m1)
+summary(m2)
+```
+
+Let's look at the "Multiple R-squared" measure here. For the first model, it 
+is `r modelr::rsquare(m1, by_group$data[[15]])` and for the second model it is 
+`r modelr::rsquare(m2, by_group$data[[15]])`. This is a difference of 0.005. While there 
+are no hard decision rules for how much improvement in r-squared is meaningful 
+or a significant improvement (more on this later), we can be confident that this 
+is not it. 
+
+However, it can be helpful to formally measure these things. We can use a 
+formal F-test to directly compare these two models since the 
+original model is fully nested within the new model -- they are identical except 
+for the addition of one predictor and fit to the same sample. An F-test gives 
+us a p-value to tell us whether the improvement in the fit to the data between 
+the two models was a statistically significant difference or not. 
+
+Confusingly, the R command to conduct this F-test is called `anova()`
+
+```{r}
+anova(m1, m2)
+```
+
+So even with a very modest improvement in R-squared, the F-test tells us that 
+the data support the conclusion that model 2 is a better fit to the data than 
+model 1. This is a case where we need to consider our question and our goals 
+to determine whether the model is superior or not. 
+
+F-tests are really useful because they allow us to test the joint significance 
+of multiple variables. We can also test multiple nested models at once. Here, 
+let's add a set of polynomial terms and jointly test whether as a group they 
+provide a statistically significant better model fit. 
+
+```{r}
+m3 <- lm(ss2 ~ ss1 + I(ss1^2) + I(ss1^3) + I(ss1^4) + n1, 
+         data = by_group$data[[15]])
+anova(m1, m2, m3)
+# summary(m3)
+```
+
+Here, we see that the polynomial terms again provide a statistically significant 
+improvement to fit, even over our model with cohort size. 
+
+```{r}
+summary(m3)
+```
+
+We see that our R-squared has increased and each individual variable is 
+statistically significant, so the F-test makes some sense. Using F-tests is a 
+useful way to understand the impact additional predictors have on our model, so 
+it's a good tool to have in your toolbelt. 
+
+Let's look at how we can apply this F-test approach to models across different 
+subsets in our example problem here. 
+
+
+```{r}
+# Define a grouped dataframe using only the columns we need (1:10)
+# group by the grade, subject, and year
+# Then nest so the data hangs together in one list
+by_group <- full_data[, 1:10] %>%
+  group_by(grade, subject, test_year) %>%
+  nest()
+
+# Define a simple function that fits our model
+simple_model <- function(df) {
+  lm(ss2 ~ ss1, data = df)
+}
+
+alt_model <- function(df) {
+  lm(ss2 ~ ss1 + I(ss1^2) + I(ss1^3) + I(ss1^4) + n1, data = df)
+}
+
+# Apply that model to each group in our dataset using the `map` function
+# This is equivalent to a loop, but more efficient to write
+by_group <- by_group %>%
+  mutate(base_model = map(data, simple_model), 
+         full_model = map(data, alt_model))
+
+# Apply a function that makes an F-test of our two models (x and y)
+# returns only the statistics from the anova object we want
+# in this case, the difference in the sum of squares and the p-value of the 
+# F-test
+simple_anova <- function(x, y, stat = c("ss", "p"), ...){
+  out <- anova(x, y)
+  if(stat == "ss"){
+    return(out$`Sum of Sq`[[2]])
+  } else if(stat == "p"){
+    return(out$`Pr(>F)`[[2]])
+  }
+}
+
+ftests <- by_group %>% rowwise() %>%
+    do(ss = unlist(simple_anova(x = .$base_model, y = .$full_model, stat = "ss")), 
+      pval = unlist(simple_anova(x = .$base_model, y = .$full_model, stat = "p")))
+
+ftests <- apply(ftests, 2, unlist) # convert to a numeric object
+ftests <- as.data.frame(ftests) # make into a data.frame for ease of use
+table(ftests$pval < 0.05)
+```
+
+This table is telling us that in roughly half of the cases, the data support the
+conclusion that the fuller model better describes the data. 
+
+As we saw, the r-squared improvement was marginal, but the F-test improvement 
+was statistically significant. These are answering slightly different questions, 
+because the F-test is intended to specifically take into account the fact that 
+every additional variable added improves model fit to the data, so the improvement 
+must be big enough to be better than this. The adjusted R-squared attempts to 
+do the same thing, but we don't have a sense of what a meaningful increase in the 
+adjusted R-squared from this number alone, so we are left to eyeball it and use 
+our judgment -- which is acceptable and good enough in many cases. 
+
+Both of these measures are only telling us how well our model fits *this* data, 
+though. That is, how well does our model fit this specific sample of data that 
+it has been shown. Often in applied analysis, we want to find a model that 
+will fit this year's data, but also fit next year's data as well. In this case, 
+we are interested in the predictive power of our model on new data. 
+
+There are model comparison methods that allow us to do just that by looking at 
+how well our model predicts the data. We'll focus on the root mean squared 
+error (RMSE) - one of the most common of these metrics. The RMSE is the square 
+root of the mean of the squared errors. So to calculate it we take our residuals, 
+square them, divide by the number of residuals (to get the mean of the squares), 
+and then take the square root of this value. It provides a good balance between 
+being sensitive to large errors, and rewarding models that fit the whole dataset 
+well. Because it is measuring the error, a lower number is better. 0 is the 
+theoretical minimum. 
+
+You can find many 
+alternatives like the Median Absolute Error (MAE), Mean Absolute Deviation (MAD), 
+and many more. But, RMSE is fairly standard and implemented in most software. 
+
+Measuring predictive performance of models its own full guide, but here are two 
+main points: 
+
+1. Always measure performance on data the model has not "seen" (e.g. was not 
+used to fit the model). Models overfit to the data they are given, so they 
+appear more accurate than they will be on future data. 
+2. Measure the performance and variability in performance where possible. We 
+want to know not just how accurate the model is, but how precisely we can 
+measure that accuracy. 
+
+To achieve this goal we use a technique called resampling. There are many forms 
+of resampling -- bootstrapping, crossvalidation, leave-one-out, and others. You 
+can find excellent treatments of these concepts online. Each of them is a method 
+to divide our data up into data the model sees (training data) and data we use 
+to measure the performance of the model (test data). We fit the model to the 
+training data, evaluate it on the test data, and repeat. We will discuss this 
+more at September Workshop.
+
+To give you a sense of this technique now, let's work a simple example where 
+we extract the RMSE for one of the fifty models and estimate it from resampled 
+data.
+
+For now, we will use a technique called  
+k-fold cross-validation because it is easy to implement and a standard. 
+This method "folds" the data K (here k = 5) times to create 
+K distinct test sets (each consisting of 1/kth of the data). Then the model 
+is fit K times, to the data that is not in each kth test set, and evaluated 
+on that test set. This gives us K estimates of the model fit from our original 
+sample. In this case, we start with 251 observations in our dataset, fold it 
+5 times, and the result is 5 training sets with ~200 observations and 5 
+corresponding test sets with ~50 observations to measure the model performance 
+against (using RMSE in this case). 
+
+```{r}
+cv_dat <- crossv_kfold(by_group$data[[7]], k = 5)
+models1 <- map(cv_dat$train, ~lm(ss2 ~ ss1, data = .))
+models2 <- map(cv_dat$train, ~lm(ss2 ~ ss1 + n1, data = .))
+models3 <- map(cv_dat$train, ~lm(ss2 ~ ss1 + I(ss1^2) + I(ss1^3) + I(ss1^4) + n1, 
+                                 data = .))
+
+plotdf <- data.frame(model_1 = map2_dbl(models1, cv_dat$test, rmse), 
+                     model_2 = map2_dbl(models2, cv_dat$test, rmse),
+                     model_3 = map2_dbl(models3, cv_dat$test, rmse))
+plotdf
+```
+
+The downside of k-fold cross-validation is that it uses a lot of data -- we can 
+only generate a few unique training/test sets (in this case 5) when we only have 
+250 observations. This makes it hard to draw conclusions about the difference 
+between our models - we don't have enough data. Look at the results, it looks 
+like model 3 generally has a lower (better) RMSE.
+
+As an alternative, for cases where we do not have a lot of data to generate 
+enough holdout sets, we can use a more general technique called bootstrapping. 
+In this case, we fit our model to the full sample - so we get the benefit of all 
+the observations. Then, we evaluate its performance against N resamples created 
+by sampling the data with replacement. So, in this case, we will create 100 
+resamples of the same size as the full sample, drawn from the full sample but 
+drawn with replacement. This will give us 100 estimates of the RMSE instead 
+of 5. 
+
+
+```{r}
+boot_dat <- bootstrap(by_group$data[[7]], n = 100) # bootstrap samples
+models1 <- lm(ss2 ~ ss1, data = by_group$data[[7]]) # fit model 1 to original sample
+models2 <- lm(ss2 ~ ss1 + n1, data = by_group$data[[7]])
+models3 <- lm(ss2 ~ ss1 + I(ss1^2) + I(ss1^3) + I(ss1^4) + n1, 
+              data = by_group$data[[7]])
+
+
+plotdf <- data.frame(model_1 = map_dbl(boot_dat$strap, 
+                                       ~rmse(models1, data = .x)), # calculate RMSE
+                     # on each subsample
+                     model_2 = map_dbl(boot_dat$strap, ~rmse(models2, data = .x)),
+                     model_3 = map_dbl(boot_dat$strap, ~rmse(models3, data = .x)))
+
+summary(plotdf)
+```
+
+With 100 measures of RMSE it looks clear that our third model is superior - it 
+has a lower average RMSE and it has a lower maximum and minimum values of RMSE 
+as well. You can use EDA techniques to plot these differences as well if you 
+like. 
+
+This brief introduction has demonstrated three possible ways you can conduct 
+model comparison:
+
+1. Informally, how well does each model explain the variance in the data it is 
+fit to (R-squared)
+2. Directly and formally, does the data support the evidence that one model fits 
+the data better than another model (F-tests)
+3. Directly and informally, does one model have a lower predictive error on 
+data it has not seen before than the other model (resampling + RMSE)
+
+We will develop and extend these ideas of predictive performance of our models in 
+future workshops and tutorials. 
+
+## Communicating Regression Models with Graphics
+
+As discussed in the lecture, interpretation of regression models can be very
+difficult as models move beyond simple bi-variate relationships. We can look at
+coefficients and model fit statistics, but this is like looking at the gears of
+a machine and trying to picture how it works. It's easier if we just turn it on!
+And regression models are computational machines designed to make predictions,
+so we can use that feature to simulate values for them and watch how they
+behave.
+
+Fortunately, this powerful technique builds on skills we have already developed
+for exploratory data analysis. The only difference is that here the data we are
+exploring are how our model predicts outcomes in response to different input we
+give it.
+
+Let's look at some examples. 
+
+First, let's create a coefficient plot and gaze upon the gears of our model: 
+
+```{r}
+install.packages("coefplot")
+library(coefplot) # easy package for visualizing lm coefficients
+coefplot(m3, intercept = FALSE) +  # intercept = FALSE avoids skewing the plot
+  # because of the large magnitude of the intercept
+  theme_bw()
+```
+
+This graphic is not very enlightening. Do you know why? If we wrote out the 
+equation for our regression model, we would see that because of the scale of our 
+predictor variables (and the `ss1` predictor specifically) and our outcome, 
+the coefficients have to have very large and very small values to fit the data 
+well when incorporating polynomial terms. Using polynomial terms results in 
+making our coefficients much harder to interpret because of the magnitudes of 
+variables involved. 
+
+```{r}
+coefplot(m2, intercept = FALSE) + theme_bw()
+```
+
+Here's a simpler plot corresponding to a simpler model. 
+
+But we don't want to be limited in our interpretation to simple models, so let's 
+look at techniques that allow us to interpret and understand more complex models 
+and go beyond the traditional reporting of coefficients. 
+
+### Margin Plots
+
+Margin plots are graphics that look at how the predictor or the coefficient of 
+interest behaves for certain subsets of the data. This helps us look at how the 
+model behavior changes as values of key variables in our data change. This is a 
+powerful technique useful for exploring complex model behaviors. Let's return 
+to our polynomial model:
+
+```{r}
+install.packages("margins")
+library(margins) # package to compute marginal plots
+margins(m3)
+marginal_effects(m3)
+
+# Spurious
+margins::cplot(m3, "ss1")
+
+```
+
+This clearly shows us the polynomial shape that the additional terms are 
+letting us explore. Let's look at another example - this time let's look at how 
+we can use marginal plots to explore a model that includes categorical variables 
+and an interaction between those variables and the outcome. 
+
+```{r}
+m4 <- lm(ss2 ~ ss1 + ss1 * locale_desc, data = full_data)
+coefplot(m4, intercept = FALSE) + theme_bw()
+margins::cplot(m4, "ss1") # average effect of ss1
+```
+
+```{r}
+margins::cplot(m4, "locale_desc") # average effect of locale
+```
+
+
+```{r}
+margins::cplot(m4, "locale_desc", dx = "ss1", what = "effect") # keep
+```
+The above figure shows the precision and variability in estimates of `ss1` for 
+each locale, based on the interaction term. These effects are plotted on the 
+scale of the `ss1` coefficient and represent the sum of the `ss1` coefficient 
+and the interaction effect - this is a more direct way to interpret interaction 
+effects than the `coefplot` or table of coefficients. 
+
+We can also plot multiple lines, one for each locale, to look at how the line 
+is changed by each locale. This isn't the only way to plot multiple lines from 
+this model, but you can do the computation with the margin package and add the 
+lines together on the same plot with this code:
+
+```{r}
+local({
+  cplot(m4, "ss1", data = full_data[full_data$locale_desc == "Rural, outside MSA",])
+  cplot(m4, "ss1", data = full_data[full_data$locale_desc == "Mid-Size City",], 
+        draw = "add", col = "blue")
+  cplot(m4, "ss1", data = full_data[full_data$locale_desc == "Small Town",], 
+        draw = "add", col = "red")
+  cplot(m4, "ss1", data = full_data[full_data$locale_desc == "Urban Fringe of a Large City",], 
+        draw = "add", col = "purple")
+  cplot(m4, "ss1", data = full_data[full_data$locale_desc == "Mid-Size City",], 
+        draw = "add", col = "gold")
+  cplot(m4, "ss1", data = full_data[full_data$locale_desc == "Large City",], 
+        draw = "add", col = "orange")
+})
+
+```
+
+
+The advantage of marginal plots is they allow you to interpret the model on the 
+scale of the outcome, not on the scale of the coefficients. This can be much 
+more intuitive to understand and allow you to present to audiences that are 
+familiar with the outcome variable, but not necessarily the inner-workings of 
+regression models. 
+
+### Counterfactual Plots
+
+A final visual way to explore our data is to create counterfactuals and see how
+reference observations or ranges of predictors change across other values. Let's
+continue with looking at locale based on our belief that different geographic
+locations have different growth functions on test scores -- perhaps due to the
+local teaching labor market or some other community factors.
+
+Luckily, counterfactual plots are easy to make. We just have to get comfortable
+making fake data!
+
+So let's look at how the predicted score of an observation would change based on
+it being assigned to a different locale. This is a very hypothetical
+counterfactual, since we cannot move schools from one geographic region to
+another, but it is an important one for highlighting how our model views the
+data.
+
+```{r}
+m5 <- lm(update(formula(m3), . ~ . + ss1 * locale_desc), data = full_data)
+# Pick a row, here we sample at random
+example_school <- full_data[sample(row.names(full_data), 1), ]
+example_school <- example_school[rep(seq_len(nrow(example_school)),
+                   each=length(unique(full_data$locale_desc))),]
+example_school$locale_desc <- unique(full_data$locale_desc)
+example_school$yhat <- predict(m5, newdata = example_school)
+
+ggplot(example_school, aes(x = locale_desc, y = yhat)) + 
+  geom_hline(yintercept = example_school$ss2[1], color = I("red")) +
+  geom_point() + theme_bw() + 
+  theme(axis.text = element_text(angle = 25))
+  
+```
+
+From this plot we can see that the observed value (red horizontal line) deviates 
+than any prediction no matter the locale we are in. We can also see that the 
+model believes our school would fare poorly in a Large City, but do best if 
+it was rural, but inside an MSA. 
+
+## Robust and Weighted Regression
+
+One problem we have noted with our data previously is that it treats big and 
+small schools alike. For some analyses this is fine, but for others, it may 
+cause our analysis problems. In these cases, we can weight our model by the 
+number of students in a school so that observations with large numbers of schools 
+will be "counted more" by the regression models than observations with fewer 
+schools. 
+
+Comparing weighted and unweighted models is not something that can be done with 
+an F-test. However, by using predictive model fit metrics like the RMSE this is 
+possible. Let's see how our polynomial model changes when we weight by the 
+number of students in a cohort. 
+
+
+```{r}
+unweighted_mod <- lm(ss2 ~ ss1 + I(ss1^2) + I(ss1^3) + I(ss1^4), 
+                          data = by_group$data[[7]])
+weighted_mod <- lm(ss2 ~ ss1 + I(ss1^2) + I(ss1^3) + I(ss1^4), 
+                          data = by_group$data[[7]], weights = n1)
+
+
+plotdf <- data.frame(unweight_rmse = map_dbl(boot_dat$strap, 
+                                       ~rmse(unweighted_mod, data = .x)), 
+                     weight_rmse = map_dbl(boot_dat$strap,
+                                           ~rmse(weighted_mod, data = .x)))
+                
+ggplot(plotdf, aes(x = unweight_rmse)) + 
+  geom_density(color = I("purple")) + 
+  geom_density(aes(x = weight_rmse), color = I("darkgreen")) + 
+  theme_bw() + labs(x = "RMSE")
+```
+
+The weighted RMSE (dark green) has a higher distribution over our bootstrap
+resamples than the unweighted RMSE (purple). Remember that we can interpret the
+RMSE as being on the scale of the square root of the outcome. Our outcome has a
+mean of ~1100 (square root ~33) . Our average predicted observation error then
+represents a substantial fraction of the mean of our outcome.
+
+Compare two example models to get a sense of how much the weights change things.
+
+```{r}
+margins::cplot(weighted_mod, "ss1", col = "darkgreen")
+margins::cplot(unweighted_mod, "ss1", draw = "add", col = "purple")
+```
+
+The coefficients change *a lot* between these two models, just by modifying the 
+weights. But, when we plot these models we can see that they are still largely 
+the same on the scale of the outcome. 
+
+### Robust Regression
+
+Those of you who have used Stata may be wondering where `robust` regression
+estimates come into play. Robust regression comes in two forms: the first is
+robust regression - a regression technique that results in different
+*coefficients* and different *standard errors*. Robust regression is designed to
+be more resistant to the influence of extreme outlier observations, so it can be
+a useful technique for analyzing data with outliers. It achieves this by using a
+different method for calculating the least-squares equation. This makes it
+different from the **second** form of robustness, a correction of the standard
+errors.
+
+In practice, the change in coefficients from robust regression will often be 
+small. For our example here, we will fit our model to the full data set, not 
+one of our fifty subsamples. 
+
+```{r}
+source("R/robust_functions.R")
+install.packages("MASS")
+install.packages("sandwich")
+library(MASS)
+library(sandwich)
+library(lmtest)
+
+full_data$frl_per[is.na(full_data$frl_per)] <- 0
+m_notrobust <- lm(ss2 ~ ss1 + n1 + total_enrollment + frl_per + att_rate + 
+                    factor(grade) + subject + factor(test_year), 
+                  data = full_data)
+m_robust <- rlm(ss2 ~ ss1 + n1 + total_enrollment + frl_per + att_rate + 
+                  factor(grade) + subject + factor(test_year), 
+                  data = full_data)
+
+coefplot::multiplot(m_robust, m_notrobust, intercept = FALSE) + theme_bw()
+```
+
+We do not see dramatically different results between our robust and non-robust 
+estimates. You can confirm this by comparing the coefficients and standard 
+errors directly using the summary function for each model. 
+
+```{r}
+summary(m_notrobust)
+summary(m_robust)
+```
+
+
+One of the problems we were looking to solve is the distribution of our errors.
+We can run a model check to see if the residuals from our robust model are better. 
+
+```{r}
+plotdf <- data.frame(y = m_robust$model$ss2, 
+                     pred_robust = predict(m_robust, data = m_robust$model), 
+                     pred_norobust = predict(m_notrobust, data = m_robust$model))
+plotdf$resid_robust <- plotdf$y - plotdf$pred_robust
+plotdf$resid_norobust <- plotdf$y - plotdf$pred_norobust
+
+ggplot(plotdf) + 
+  geom_point(alpha = I(0.1), aes(x = pred_norobust, y = resid_norobust)) + 
+  geom_hline(yintercept = 0, linetype = 2) +
+  geom_smooth(aes(x = pred_robust, y = resid_robust), 
+              color = I("red"), se = FALSE) + 
+  geom_smooth(aes(x = pred_norobust, y = resid_norobust), 
+              color = I("black"), se=FALSE) + 
+  
+  theme_bw()
+
+```
+
+The robust estimator does almost nothing to improve our residual plot either - 
+even at extreme values the attenuation of the residuals is small. 
+So there are limits to the strength of robust regression aiding in the presence 
+of outliers.
+
+However, the robust estimates of our parameters, coefficients, should be less
+influenced by these outliers. So robustness does not help us with prediction
+very much, but it does help us adjust for the bias that can occur in our
+coefficients when there are strong outliers in the data. This is why it is
+important to understand the purpose of the models we are fitting, in order to
+understand when different corrections are appropriate.
+We should prefer the robust coefficients for understanding the relationships
+within our data, but we may not prefer the robust coefficients for the purposes
+of making new predictions on future data.
+
+#### Robust Standard Errors
+
+In addition to robust regression estimates, a more standard procedure is to
+adjust the standard errors in our model with a postestimation adjustment. In
+this case, the model coefficients stay the same - they are the OLS betas - but
+the standard errors have been adjusted to reflect the non-indepedence between
+our observations.
+
+In R this procedure is much more complicated than Stata, owing to R's refusal 
+to implement defaults. There are many different acceptable estimators to adjust 
+the standard errors - Stata uses a default and does not bother the user. R 
+refuses. To replicate the behavior of Stata, use "HC1" as the adjustment. 
+
+```{r}
+library(sandwich)
+library(lmtest)
+summary(m_notrobust)$coefficients
+coeftest(m_notrobust, 
+         vcov = vcovHC(m_notrobust, "HC1"))
+```
+
+Remember, this adjustment only affects the standard errors - the coefficients 
+remain the same. (If this code doesn't work, make sure to install 
+`gridExtra` first)
+
+```{r}
+install.packages("gridExtra")
+gridExtra::grid.arrange(coefplot(m_notrobust, intercept = FALSE, 
+                                 sort = "alphabetical") + theme_bw(), 
+                        coefplot_coeftest(
+                          coeftest(m_notrobust, vcov = vcovHC(m_notrobust, "HC1")), 
+                          intercept = FALSE)
+                        )
+```
+
+In this case, the adjustment looks minor - it's nearly impossible to distinguish 
+in our coefficient plots and does not affect our decision about the statistical 
+significance of any of our predictors. This is a good sign!
+
+#### Cluster Standard Errors
+
+There is a special case of robust standard errors that are very important in
+education regression modeling - cluster standard errors. Cluster standard errors
+allow us to account for the fact that observations drawn from the same "cluster"
+covary with each other, and thus they are not fully independent. We can use this
+information to get a more accurate estimate of our model's certainty - generally
+by inflating the standard errors a bit to account for this duplicated
+information.
+
+This technique is important in education because education data is full of
+"clusters" - repeated test scores for the same student, students in the same
+classroom, classrooms in the same school, schools in the same district, and even
+districts in the same state.
+
+Let's just look at one example where we cluster on the school district code in
+our data.
+
+```{r}
+cluster_vcov <- get_CL_vcov(m_notrobust, full_data$distid)
+summary(m_notrobust)$coefficients
+coeftest(m_notrobust, vcov = cluster_vcov)
+
+coefplot(m_notrobust, intercept = FALSE)
+coefplot_coeftest(coeftest(m_notrobust, vcov = cluster_vcov), intercept = FALSE)
+
+```
+
+We see that clustering has a much bigger impact on our standard errors than the
+robustness correction we applied above. Here we see the standard errors increase
+by 2-5x in size, resulting in the `att_rate` predictor that once seemed
+statistically significant to no longer be so.
+
+Clustering in this way does not help with our residuals though because while it
+changes the standard errors around our coefficients and predictions, it does not
+change the coefficients which are used to generate the prediction. See for
+yourself:
+
+```{r}
+plotdf <- data.frame(y = full_data$ss2, 
+                     yhat_nr = fitted(m_notrobust), 
+                     yhat_r = predict.robust(m_notrobust, data = full_data, 
+                                             robust_vcov = cluster_vcov))
+
+plotdf$resid_robust <- plotdf$y - plotdf$yhat_r.fit.fit
+plotdf$resid_norobust <- plotdf$y - plotdf$yhat_nr
+
+ggplot(plotdf) + 
+  geom_point(alpha = I(0.1), aes(x = yhat_nr, y = resid_norobust)) + 
+  geom_smooth(aes(x = yhat_r.fit.fit, y = resid_robust), 
+              color = I("red"), se = FALSE) + 
+  geom_smooth(aes(x = yhat_nr, y = resid_norobust), 
+              color = I("black"), se=FALSE) + 
+  theme_bw()
+
+
+```
+
+
+
+```{r, eval = FALSE}
+coeftest(m4, vcov = vcovHC(m4, "HC1"))
+coeftest(m4, vcov = sandwich)
+coeftest(m4, vcov = vcovHC(m4, "HC0"))
+
+
+# check that "sandwich" returns HC0
+coeftest(m4, vcov = sandwich)                # robust; sandwich
+coeftest(m4, vcov = vcovHC(m4, "HC0"))    # robust; HC0 
+
+# check that the default robust var-cov matrix is HC3
+coeftest(m4, vcov = vcovHC(m4))           # robust; HC3 
+coeftest(m4, vcov = vcovHC(m4, "HC3"))    # robust; HC3 (default)
+
+# reproduce the Stata default
+coeftest(m4, vcov = vcovHC(m4, "HC1"))    # robust; HC1 (Stata default)
+
+```
+
+
+## Descriptive Regression
+
+As we discussed in the lecture, a powerful use of regression is to calculate an 
+estimate of a variable accounting for multiple other factors simultaneously. 
+Regression allows us to look at a key variable like a posttest score after 
+accounting for key attributes of the test takers, like their demographic 
+characteristics or their prior attendance. 
+
+
+### Demographic Adjustments
+
+One of the things people like to do is adjust for multiple student or 
+school conditions simultaneously and then identify performance. We know 
+all the parts necessary to do this - we define and fit a model, get its 
+predictions, and then we plot the predictions using EDA techniques we have 
+already mastered. 
+
+```{r}
+# Missing data results from dividing by 0, so we can set these at 0
+full_data$ell_per[is.na(full_data$ell_per)] <- 0
+full_data$swd_per[is.na(full_data$swd_per)] <- 0
+# 
+# Fit adjustment model
+adj_model <- lm(ss2 ~ factor(grade) * factor(test_year) + subject + frl_per + 
+                  ell_per + swd_per + n1 + locale_desc, data = full_data)
+full_data$adj_ss2 <- predict(adj_model)
+
+
+```
+
+
+This code just selects some sample districts and creates two boxplots of their 
+school/grade cohort scores before and after adjusting for demographics - as 
+we looked at in the lecture. 
+
+```{r}
+example_districts <- c(155, 352, 277, 98, 323, 75, 44, 131, 280, 205)
+p1 <- ggplot(full_data[full_data$distid %in% example_districts, ], 
+       aes(y = adj_ss2, x = factor(distid))) + 
+  geom_boxplot() + geom_jitter() + theme_bw() + 
+  labs(title = "Adjusted Scores", x = "DISTID", y = "Adjusted SS2") + 
+  ylim(1000, 1350)
+
+p2 <- ggplot(full_data[full_data$distid %in% example_districts, ], 
+       aes(y = ss2, x = factor(distid))) + 
+  geom_boxplot() + geom_jitter() + theme_bw() + 
+  labs(title = "Unadjusted Scores", x = "DISTID", y= "Observed SS2") + 
+  ylim(1000, 1350) 
+
+
+gridExtra::grid.arrange(p1, p2, ncol = 2)
+```
+
+
+We may also want to estimate the influence of one variable on another, but 
+account for these conditional differences. One common question (h/t to Abigail) 
+is the relationship between attendance and test scores. We often want to identify 
+a critical threhold in this relationship. In the plot below, we use a scatterplot 
+smoother between the posttest score and the school attendance rate to identify 
+where the relationship between attendance and test scores changes. We expect 
+there to be diminishing returns at both ends -- additional days attending do not 
+yield higher test scores at some point, the same way additional absences stop 
+lowering test scores at some point. 
+
+But, we may be interested in understanding if this relationship is different 
+after we have taken other factors about schools or students into account - so 
+let's compare our scores adjusted for school composition effects against the 
+unadjusted scores, and look at how this relationship changes. 
+
+```{r}
+
+p1 <- ggplot(full_data[full_data$att_rate > 50,], 
+       aes(y = adj_ss2, x = att_rate)) + 
+    geom_jitter(alpha=1/7) + theme_bw() + 
+    labs(title = "Adjusted Scores", x = "Pre-Test", y= "Adjusted SS2") + 
+    geom_smooth(se=FALSE)  + ylim(1000, 1350) 
+
+p2 <-  ggplot(full_data[full_data$att_rate > 50,], 
+       aes(y = ss2, x = att_rate)) +  
+  geom_jitter(alpha = 1/7) + theme_bw() + 
+  labs(title = "Unadjusted Scores", x = "Attendance", y= "Observed SS2") + 
+  geom_smooth(se=FALSE) + ylim(1000, 1350) 
+
+gridExtra::grid.arrange(p1, p2, ncol = 2)
+
+```
+
+This plot does not display much difference, but it is seems clear that in the 
+adjusted scores, the relationship with the posttest levels off at slightly 
+higher attendance rates than the unadjusted scores. This suggests that after 
+accounting for demographics, the cutpoint where attendance matters less is 
+higher, and we may want to consider recommending a higher attendance threshold 
+than we would if we only considered the unadjusted scores. 
+
+### Simplified Value-Added
+
+Value-added is another descriptive use of regression where we fit a model that 
+we hope explains all the factors contributing to student growth that are 
+observable, and then we look at the residual error from that model, the 
+unobserved error, and interpret it as attributable to the school or teacher 
+etc. 
+
+```{r}
+
+vam_model <- lm(ss2 ~ ss1 + factor(grade) * factor(test_year) + frl_per + 
+                  ell_per + swd_per + n1 + locale_desc + att_rate + subject +
+                  factor(distid), data = full_data)
+full_data$vam_ss2 <- predict(vam_model)
+full_data$vam_score <- rstandard(vam_model)
+
+
+ggplot(full_data[full_data$distid %in% example_districts, ], 
+       aes(y = vam_score, x = factor(distid))) + 
+  geom_boxplot(color="gray80") + geom_jitter() + theme_bw() + 
+  labs(title = "Vam Scores", x = "DISTID", y= "Observed SS2")
+
+
+```
+
+
+VAM models are often more complex and include post-estimation adjustments of the
+residuals to account for the sample size or aggregation of schools into
+districts or classrooms into schools. But, this is the basic format of
+value-added modeling and the intuition that underlies it.
+
+As a final question - how much better does this value-added model fit the 
+data than other models we have used in the guide? How might you evaluate that? 
+What are the consequences of that for interpretation?
+
+## BONUS: Testing Many Models
+
+Above, we have shown regression diagnostics for just one model. But, now our 
+colleague has proposed fifty. The model above shows signs of misspecification and 
+heteroskedasticity - which gives us reason to consider testing the other 49 
+models and comparing them. 
+
+To do this, we will use an R function that applies the test to each model 
+and returns a data.frame with one row per model and one column per test. It's 
+OK if you don't feel comfortable writing and editing functions just yet - but 
+this is a useful example of how the flexibility to writing functions can allow you 
+to do scale your analysis from one to many models easily. 
+
+First the function, we'll call it `regress_battery` - as in a battery of regression 
+tests. 
+
+
+```{r}
+# Functions are just named objects in R of a special type
+# Here we name our function, and we say that it is a function with two "arguments"
+# the first model, the second order_var. The default value of order_var is NULL
+regress_battery <- function(model, order_var = NULL) {
+  # model = a regression model object, of class lm
+  # order_var = a vector of values to reorder the regression test by
+  
+  # First, extract the residuals from the model, we need these for some 
+  # types of regression tests
+    ordered_resids <- residuals(model)
+  if (!is.null(order_var)) { # if order is given, reorder the residuals
+      ordered_resids <- ordered_resids[order(order_var)]
+      order_by <- order_var[1]
+  } else {
+    # If no order is given, specify that the order value is NA
+      order_by <- NA
+  }
+  suppressWarnings({ # avoid some annoying output to the console caused by the tests
+    out <- data.frame(
+            order_by = order_by, # give an example value of the sort by data
+            breusch_pagan = bptest(model)$p.value, # p-value from bptest
+            goldfeld_quandt = gqtest(model)$p.value,
+            harvey_collier = harvtest(model, order.by = order_var)$p.value,
+            reset = reset(model, power = 2:4)$p.value,
+            rainbow = raintest(model, order.by = order_var)$p.value,
+            box_test = Box.test(ordered_resids)$p.value,
+            ljung_test = Box.test(ordered_resids, type = "Ljung")$p.value,
+            durbin_watson = dwtest(model, order.by = order_var)$p.value,
+            breusch_godfrey = bgtest(model, order.by = order_var)$p.value
+          )
+    })
+  
+  out[, 2:10] <- apply(out[, 2:10], 2, round, 3) # round p-values to the 0.001
+  row.names(out) <- NULL
+  return(out) # return the data.frame
+}
+
+# Now call the function
+regress_battery(m1, order_var = by_group$data[[15]]$distid)
+```
+
+This example model shows signs of heteroskedacticity and perhaps a need for 
+polynomial terms, but otherwise checks out. However, it isn't about how a single 
+model performs - we want to assess collectively how the fifty models on our 
+fifty subsamples perform. 
+
+To test all of them, we use the `rowwise()` operator to operate 
+on each row of our `by_group` data frame. We take one model and the data set 
+it was fit to from the `model` and `data` columns respectively, and then 
+produce a new data.frame with 50 rows of regression diagnostiics. 
+
+
+```{r}
+# Group the data and appply the function to each model
+mod_test_ss1 <- by_group %>%  
+  rowwise() %>% 
+  do(regress_battery(model = .$base_model, order_var = .$data$ss1))
+mod_test_ss1$order_by <- "ss1"
+
+mod_test_ss1 <- bind_cols(by_group %>% 
+                            dplyr::select(grade, subject, test_year), 
+                          mod_test_ss1)
+
+# Group the data and appply the function to each model
+mod_test_distid <- by_group %>%  
+  rowwise() %>% 
+  do(regress_battery(model = .$base_model, order_var = .$data$distid))
+mod_test_distid$order_by <- "distid"
+
+mod_test_distid <- bind_cols(by_group %>% dplyr::select(grade, subject, test_year), 
+                          mod_test_distid)
+
+```
+
+If you want, you can inspect the results for these models. 
+
+Now we reshape and plot
+
+```{r}
+plotdf <- bind_rows(mod_test_ss1, mod_test_distid) %>% 
+  as.data.frame
+
+names(plotdf)[5:13] <- paste0("p_value", ".", names(plotdf)[5:13])
+
+plotdf <- reshape(plotdf, direction = "long",  
+                  varying = 5:13, 
+                  sep = ".", new.row.names = NULL)
+
+custom_brks <- c(0, 0.1, 0.2, 0.5, 0.8, 1)
+
+ggplot(plotdf, aes(x = p_value)) + geom_histogram(breaks = custom_brks) + 
+  facet_grid(order_by~time) + theme_bw()
+```
+
+This chart shows us for each test how many models out of fifty are at which 
+p-value. The "Breusch-Pagan" column shows that almost all models are grouped at 
+a low p-value (e.g. indicating the diagnostic is finding a problem). On the 
+other hand, the rainbow test shows that almost no models when ordered by 
+`distid` and almost all models when ordered by `ss1` have low p-values 
+indicating the diagnostic has found a problem. 
+
+The other tests are much more mixed - a set of models fail and a set of models 
+pass quite a bit. The results are not conclusive - across the fifty models 
+the diagnostics show that some models fail some tests and pass others. 
+
+## BONUS: Over the Top Outlier Plot
+
+To make a fun plot:
+Of interest to us is the `is.inf` object, which for each row in our data provides 
+six true/false values indicating whether an observation is influential on one 
+of 5 measures plus an additional measure for every coefficient in our model. 
+
+```{r}
+
+# Define outlier status across these variables
+sch_score_m1$outlier <- sch_score_m1$.hat + sch_score_m1$.cooksd + sch_score_m1$.std.resid
+
+ggplot(sch_score_m1) + aes(x = ss1, y = ss2, color = outlier^2, 
+                        size = outlier^2) + 
+  geom_point(alpha = I(0.33)) +
+  scale_colour_gradient(low = "blue", high="red", breaks = c(0, 1, 4, 9))+
+  scale_radius(range = c(0,9), breaks = c(0, 1, 4, 9)) +
+  guides(color = guide_legend(), size = guide_legend()) +
+  labs(color = "Strength of Infl.", size = "Strength of Infl.", 
+       title = "Influence of Observations on Regression Line") +
+  geom_smooth(se=FALSE, show.legend = FALSE) +
+  geom_smooth(method= "lm", se=FALSE, show.legend = FALSE, 
+              color = I("black"), linetype = 2) +
+  geom_hline(yintercept = mean(sch_score_m1$ss2)) + 
+  geom_vline(xintercept = mean(sch_score_m1$ss1)) + theme_bw()
+
+```
+
+
